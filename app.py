@@ -16,12 +16,11 @@ FILE_PATH = "score_data.csv"
 IMG_DIR = "evidence_photos"
 CONFIG_FILE = "config.json"
 HOLIDAY_FILE = "holidays.csv"
-INSPECTORS_FILE = "inspectors.json" # 新增：人員名單檔案
+INSPECTORS_FILE = "inspectors.json" 
 
-# 確保資料夾存在
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 
-# --- 預設名單 (如果沒有設定檔時使用) ---
+# --- 預設名單 ---
 DEFAULT_HYGIENE = [
     "311019 衛糾01 胡林琇涵", "311005 衛糾02 康克勤", "311076 衛糾03 戴可婕", "311119 衛糾04 羅苡宸",
     "311118 衛糾05 鍾語芯", "312021 衛糾06 許舒婷", "312012 衛糾07 江芸茜", "313017 衛糾08 何詒恩",
@@ -44,7 +43,7 @@ DEFAULT_ENV = [
     "411089 機動02 江書文"
 ]
 
-# --- 讀取/儲存 設定檔 (開學日) ---
+# --- 讀取/儲存 設定檔 ---
 def load_config():
     default_config = {"semester_start": "2025-08-25"}
     if os.path.exists(CONFIG_FILE):
@@ -64,7 +63,6 @@ def load_inspectors():
         with open(INSPECTORS_FILE, "r", encoding='utf-8') as f:
             return json.load(f)
     else:
-        # 如果檔案不存在，回傳預設值並建立檔案
         default_data = {"hygiene": DEFAULT_HYGIENE, "env": DEFAULT_ENV}
         with open(INSPECTORS_FILE, "w", encoding='utf-8') as f:
             json.dump(default_data, f, ensure_ascii=False)
@@ -163,7 +161,6 @@ if app_mode == "我是糾察隊 (評分)":
     
     role = st.selectbox("檢查項目", ("內掃檢查", "外掃檢查", "垃圾/回收檢查", "晨間打掃"))
     
-    # 使用動態載入的名單
     if role == "垃圾/回收檢查":
         inspector_name = st.selectbox("檢查人員姓名", env_team)
     elif role == "晨間打掃":
@@ -213,6 +210,10 @@ if app_mode == "我是糾察隊 (評分)":
             morning_score = st.number_input("扣分分數", min_value=0, step=1)
             note = st.text_input("違規說明", placeholder="例如：未進行打掃")
 
+        # --- v9.0 新增：修正資料勾選 ---
+        st.write("")
+        is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，請通知老師刪除上一筆錯誤紀錄)")
+
         uploaded_files = st.file_uploader("📸 上傳違規照片 (可多選)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
         
         submitted = st.form_submit_button("送出評分", use_container_width=True)
@@ -231,13 +232,18 @@ if app_mode == "我是糾察隊 (評分)":
             
             img_path_str = ";".join(saved_paths)
 
+            # 如果是修正資料，自動在備註加標籤
+            final_note = note
+            if is_correction:
+                final_note = f"【申請更正】 {note}"
+
             entry = {
                 "日期": input_date, "週次": week_num, "班級": selected_class,
                 "評分項目": role, "檢查人員": inspector_name,
                 "內掃原始分": in_score, "外掃原始分": out_score,
                 "垃圾原始分": trash_score, "晨間打掃原始分": morning_score,
                 "手機人數": phone_count,
-                "備註": note, "照片路徑": img_path_str,
+                "備註": final_note, "照片路徑": img_path_str,
                 "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             save_entry(entry)
@@ -357,23 +363,49 @@ elif app_mode == "衛生組後台":
                     st.dataframe(report.style.format({"當日總扣分": "{:.0f}", "本週成績": "{:.0f}"})
                                 .background_gradient(subset=["本週成績"], cmap="RdYlGn", vmin=60, vmax=90))
 
-        # --- Tab 2: 修正區 ---
+        # --- Tab 2: 修正區 (v9.0 優化) ---
         with tab2:
             st.write("勾選要刪除的項目，然後點擊下方的刪除按鈕。")
+            
             if not df.empty:
-                options = {i: f"{row['日期']} {row['班級']} - {row['評分項目']} (扣 {row['內掃原始分']+row['外掃原始分']+row['垃圾原始分']+row['晨間打掃原始分']} 分)" for i, row in df.iterrows()}
-                selected_indices = st.multiselect("請選擇要刪除的紀錄：", options=options.keys(), format_func=lambda x: f"[{x}] {options[x]}")
-                if st.button("🗑️ 確認刪除選取項目"):
-                    if selected_indices:
-                        delete_entry(selected_indices)
-                        st.success("刪除成功！")
-                        st.rerun()
+                # --- v9.0 新增篩選器 ---
+                filter_correction = st.checkbox("🔍 只顯示包含【申請更正】的資料")
+                
+                # 建立顯示用的 DataFrame
+                display_df = df.copy()
+                if filter_correction:
+                    # 篩選備註含有 "【申請更正】" 的列
+                    display_df = display_df[display_df["備註"].astype(str).str.contains("【申請更正】", na=False)]
+                
+                if not display_df.empty:
+                    # 選單使用 display_df 來呈現，但 key (index) 還是要對應回原始 df
+                    options = {i: f"{row['日期']} {row['班級']} - {row['評分項目']} (扣 {row['內掃原始分']+row['外掃原始分']+row['垃圾原始分']+row['晨間打掃原始分']} 分) | 備註: {row['備註']}" for i, row in display_df.iterrows()}
+                    
+                    selected_indices = st.multiselect(
+                        "請選擇要刪除的紀錄：",
+                        options=options.keys(),
+                        format_func=lambda x: f"[{x}] {options[x]}"
+                    )
+                    
+                    if st.button("🗑️ 確認刪除選取項目"):
+                        if selected_indices:
+                            delete_entry(selected_indices)
+                            st.success("刪除成功！")
+                            st.rerun()
+                        else:
+                            st.warning("請先選擇要刪除的項目")
+                else:
+                    if filter_correction:
+                        st.info("目前沒有標記為【申請更正】的資料。")
+                    else:
+                        st.info("無資料")
+            else:
+                st.info("無資料")
 
         # --- Tab 3: 系統設定區 ---
         with tab3:
             st.header("⚙️ 系統參數設定")
             
-            # 1. 學期設定
             st.subheader("1. 學期開學日")
             config = load_config()
             current_start = datetime.strptime(config["semester_start"], "%Y-%m-%d").date()
@@ -385,7 +417,6 @@ elif app_mode == "衛生組後台":
             
             st.divider()
             
-            # 2. 假日設定
             st.subheader("2. 假日/停課登錄")
             c1, c2 = st.columns([2, 1])
             h_date = c1.date_input("選擇假日日期", datetime.now())
@@ -409,17 +440,13 @@ elif app_mode == "衛生組後台":
 
             st.divider()
 
-            # 3. 人員名單設定 (本次更新重點)
             st.subheader("3. 👥 人員名單管理")
-            
-            # 選擇要編輯的隊伍
             edit_team = st.radio("選擇要編輯的隊伍", ["衛生糾察隊 (內/外掃)", "環保糾察隊 (垃圾/回收)"], horizontal=True)
             
             current_inspectors = load_inspectors()
             target_list_key = "hygiene" if edit_team == "衛生糾察隊 (內/外掃)" else "env"
             current_list = current_inspectors[target_list_key]
             
-            # 新增人員
             col_add1, col_add2 = st.columns([3, 1])
             new_member = col_add1.text_input("輸入新人員 (建議格式：學號 職稱 姓名)", placeholder="例如：123456 衛糾99 王小明")
             if col_add2.button("➕ 加入名單"):
@@ -433,20 +460,15 @@ elif app_mode == "衛生組後台":
                 else:
                     st.warning("請輸入內容")
             
-            # 刪除人員 (使用多選單)
             st.write("移除人員：")
             members_to_remove = st.multiselect("選擇要移除的人員", current_list)
             if st.button("🗑️ 確認移除人員"):
                 if members_to_remove:
-                    # 重新建立不包含移除人員的新清單
                     new_list = [m for m in current_list if m not in members_to_remove]
-                    
-                    # 更新資料
                     if target_list_key == "hygiene":
                         save_inspectors(new_list, current_inspectors["env"])
                     else:
                         save_inspectors(current_inspectors["hygiene"], new_list)
-                        
                     st.success("已移除選取人員！")
                     st.rerun()
 
