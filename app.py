@@ -7,6 +7,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import time
+import urllib.parse 
 
 # --- 設定網頁標題 ---
 st.set_page_config(page_title="衛生糾察評分系統", layout="wide")
@@ -27,8 +28,14 @@ TEACHER_FILE = "導師名單.csv"
 
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 
+# --- Session State 初始化 ---
+if 'clean_form_key' not in st.session_state:
+    st.session_state.clean_form_key = 0
+if 'trash_form_key' not in st.session_state:
+    st.session_state.trash_form_key = 0
+
 # ==========================================
-# 1. 設定檔與密碼管理 (v35.0 新增 Email 設定)
+# 1. 設定檔與密碼管理
 # ==========================================
 
 def load_config():
@@ -36,8 +43,8 @@ def load_config():
         "semester_start": "2025-08-25",
         "admin_password": "1234",
         "team_password": "0000",
-        "smtp_email": "",      # 寄件者信箱
-        "smtp_password": ""    # 應用程式密碼
+        "smtp_email": "",
+        "smtp_password": ""
     }
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding='utf-8') as f:
@@ -283,6 +290,11 @@ def load_data():
                 if col not in df.columns: df[col] = ""
             elif col not in df.columns: 
                 df[col] = 0 if "分" in col or "人數" in col else ""
+        
+        # v36.0: 強制處理備註欄位的 NaN，避免 Pivot Table 報錯
+        if "備註" in df.columns:
+            df["備註"] = df["備註"].fillna("").astype(str)
+            
         return df
     else:
         return pd.DataFrame(columns=[
@@ -344,21 +356,15 @@ def is_within_appeal_period(record_date_str, limit_days=3):
 
 # --- v35.0 郵件寄送函式 ---
 def send_batch_email(notifications, sender_email, sender_password):
-    # notifications = [{"email": "...", "subject": "...", "body": "..."}]
     if not sender_email or not sender_password:
         return "尚未設定寄件者資訊，請至系統設定填寫。", 0
-    
     success_count = 0
     error_msg = ""
-    
     try:
-        # 連線 Gmail SMTP (Port 587)
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender_email, sender_password)
-        
         progress_bar = st.progress(0)
-        
         for idx, note in enumerate(notifications):
             try:
                 msg = MIMEMultipart()
@@ -366,19 +372,14 @@ def send_batch_email(notifications, sender_email, sender_password):
                 msg['To'] = note['email']
                 msg['Subject'] = note['subject']
                 msg.attach(MIMEText(note['body'], 'plain'))
-                
                 server.send_message(msg)
                 success_count += 1
             except Exception as e:
                 error_msg += f"寄送失敗 ({note['email']}): {str(e)}\n"
-            
-            # 更新進度條
             progress_bar.progress((idx + 1) / len(notifications))
-            time.sleep(0.5) # 稍微暫停避免被 Google 封鎖
-            
+            time.sleep(0.5) 
         server.quit()
         return error_msg, success_count
-        
     except Exception as e:
         return f"SMTP 連線失敗: {str(e)}", 0
 
@@ -469,15 +470,19 @@ if app_mode == "我是糾察隊 (評分)":
             with c_btn:
                 st.write("")
                 st.write("")
-                if st.button("🔄 重置表格", use_container_width=True): st.rerun()
+                if st.button("🔄 重置表格", use_container_width=True): 
+                    st.session_state.trash_form_key += 1
+                    st.rerun()
             
             st.markdown(f"### 📋 全校違規登記表 ({trash_category})")
             st.info("請直接在違規項目打勾 (✅ = 扣分)")
             
             trash_data = [{"班級": cls, "無簽名": False, "分類錯": False} for cls in all_classes]
             trash_df_init = pd.DataFrame(trash_data)
+            
             edited_trash_df = st.data_editor(
                 trash_df_init,
+                key=f"trash_editor_{st.session_state.trash_form_key}",
                 column_config={
                     "班級": st.column_config.TextColumn("班級", disabled=True),
                     "無簽名": st.column_config.CheckboxColumn("❌ 無簽名", default=False),
@@ -498,32 +503,35 @@ if app_mode == "我是糾察隊 (評分)":
             with c_btn_cls:
                 st.write("")
                 st.write("")
-                if st.button("🔄 重置表單", use_container_width=True): st.rerun()
+                if st.button("🔄 重置表單", use_container_width=True):
+                    st.session_state.clean_form_key += 1
+                    st.rerun()
             st.info(f"📅 第 {week_num} 週")
 
         with st.form("scoring_form", clear_on_submit=True):
             in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
             is_perfect = False
+            k_suffix = st.session_state.clean_form_key
             
             if role == "內掃檢查":
-                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True)
+                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True, key=f"radio_{k_suffix}")
                 if check_status == "❌ 發現違規":
                     st.subheader("違規事項登錄")
-                    in_score = st.number_input("🧹 內掃扣分", min_value=0, step=1)
-                    note = st.text_input("違規說明", placeholder="例：黑板未擦")
-                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
+                    in_score = st.number_input("🧹 內掃扣分", min_value=0, step=1, key=f"in_{k_suffix}")
+                    note = st.text_input("違規說明", placeholder="例：黑板未擦", key=f"note_{k_suffix}")
+                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1, key=f"phone_{k_suffix}")
                 else:
                     is_perfect = True
                     st.success("🎉 太棒了！請上傳照片作為嘉獎佐證。")
                     note = "【優良】環境整潔"
 
             elif role == "外掃檢查":
-                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True)
+                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True, key=f"radio_out_{k_suffix}")
                 if check_status == "❌ 發現違規":
                     st.subheader("違規事項登錄")
-                    out_score = st.number_input("🍂 外掃扣分", min_value=0, step=1)
-                    note = st.text_input("違規說明", placeholder="例：走廊有垃圾")
-                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
+                    out_score = st.number_input("🍂 外掃扣分", min_value=0, step=1, key=f"out_{k_suffix}")
+                    note = st.text_input("違規說明", placeholder="例：走廊有垃圾", key=f"note_out_{k_suffix}")
+                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1, key=f"phone_out_{k_suffix}")
                 else:
                     is_perfect = True
                     st.success("🎉 太棒了！請上傳照片作為嘉獎佐證。")
@@ -536,12 +544,12 @@ if app_mode == "我是糾察隊 (評分)":
 
             st.write("")
             if role != "垃圾/回收檢查" and role != "晨間打掃":
-                is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將覆蓋舊紀錄)")
+                is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將覆蓋舊紀錄)", key=f"fix_{k_suffix}")
             else: is_correction = False
 
             uploaded_files = None
             if role in ["內掃檢查", "外掃檢查"]:
-                uploaded_files = st.file_uploader("📸 上傳照片 (違規或優良佐證)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+                uploaded_files = st.file_uploader("📸 上傳照片 (違規或優良佐證)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key=f"file_{k_suffix}")
             
             submitted = st.form_submit_button("送出評分", use_container_width=True)
 
@@ -608,8 +616,10 @@ if app_mode == "我是糾察隊 (評分)":
                                 }
                                 save_entry(entry)
                                 saved_count += 1
+                        
+                        st.session_state.trash_form_key += 1
                         if saved_count > 0: 
-                            st.success(f"✅ 已成功登記 {saved_count} 筆違規紀錄！")
+                            st.success(f"✅ 已成功登記 {saved_count} 筆違規紀錄！(表格已重置)")
                             st.rerun()
                         else: st.info("👍 沒有任何班級違規。")
 
@@ -627,7 +637,8 @@ if app_mode == "我是糾察隊 (評分)":
                         "修正": is_correction, "晨掃未到者": ""
                     }
                     save_entry(entry)
-                    st.success(f"✅ 登記完成！")
+                    st.success(f"✅ 登記完成！(表單已重置)")
+                    st.session_state.clean_form_key += 1
                     st.rerun()
     else:
         st.info("👈 請在左側輸入通行碼以開始評分")
@@ -723,7 +734,6 @@ elif app_mode == "衛生組後台":
         df = load_data()
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 成績報表", "📧 違規通知", "📢 申訴管理", "🛠️ 資料管理", "⚙️ 系統設定", "🩺 資料診斷"])
         
-        # --- Tab 1: 報表區 ---
         with tab1:
             if not df.empty:
                 available_weeks = sorted(df["週次"].unique())
@@ -754,8 +764,7 @@ elif app_mode == "衛生組後台":
                         daily_group = cleaned_df.groupby(["日期", "班級"]).agg({
                             "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum", 
                             "垃圾內掃原始分": "sum", "垃圾外掃原始分": "sum",
-                            "晨間打掃原始分": "sum",
-                            "手機人數": "sum", 
+                            "晨間打掃原始分": "sum", "手機人數": "sum", 
                             "備註": lambda x: " | ".join([str(s) for s in x if str(s) not in ["", "nan", "None"]]),
                             "檢查人員": lambda x: ", ".join(set([str(s) for s in x if str(s) not in ["", "nan"]]))
                         }).reset_index()
@@ -763,7 +772,6 @@ elif app_mode == "衛生組後台":
                         daily_group["內掃結算"] = daily_group["內掃原始分"].apply(lambda x: min(x, 2))
                         daily_group["外掃結算"] = daily_group["外掃原始分"].apply(lambda x: min(x, 2))
                         daily_group["垃圾結算"] = (daily_group["垃圾原始分"] + daily_group["垃圾內掃原始分"] + daily_group["垃圾外掃原始分"]).apply(lambda x: min(x, 2))
-                        
                         daily_group["晨間打掃結算"] = daily_group["晨間打掃原始分"]
                         daily_group["手機扣分"] = daily_group["手機人數"] * 1
                         
@@ -782,10 +790,21 @@ elif app_mode == "衛生組後台":
                         final_cols = ["班級"] + date_cols + ["當日總扣分", "總成績"]
                         report = report[final_cols].sort_values(by="總成績", ascending=False)
                         
-                        cleaned_df['違規簡述'] = cleaned_df.apply(lambda row: row['備註'], axis=1) # 簡化為直接顯示備註
-                        reason_pivot = pd.DataFrame()
-                        if not cleaned_df.empty:
-                            reason_pivot = cleaned_df.pivot_table(index="班級", columns="日期", values="備註", aggfunc=lambda x: "\n".join(x)).reset_index().fillna("")
+                        def make_desc(row):
+                            reasons = []
+                            if row["內掃原始分"] > 0: reasons.append(f"內掃({row['內掃原始分']})")
+                            if row["外掃原始分"] > 0: reasons.append(f"外掃({row['外掃原始分']})")
+                            trash_s = row["垃圾原始分"] + row["垃圾內掃原始分"] + row["垃圾外掃原始分"]
+                            if trash_s > 0: reasons.append(f"垃圾({trash_s})")
+                            if row["晨間打掃原始分"] > 0: reasons.append(f"晨掃({row['晨間打掃原始分']})")
+                            if row["手機人數"] > 0: reasons.append(f"手機({row['手機人數']})")
+                            if "【優良】" in str(row["備註"]): reasons.append("✨優良")
+                            return "\n".join(reasons)
+                        
+                        cleaned_df['違規簡述'] = cleaned_df.apply(make_desc, axis=1)
+                        # v36.0 這裡加上強制轉字串，防止備註是 NaN 時報錯
+                        cleaned_df["備註"] = cleaned_df["備註"].astype(str)
+                        reason_pivot = cleaned_df.pivot_table(index="班級", columns="日期", values="備註", aggfunc=lambda x: "\n".join(x)).reset_index().fillna("")
 
                         morning_absent_df = cleaned_df[cleaned_df["評分項目"] == "晨間打掃"][["日期", "班級", "晨掃未到者", "晨間打掃原始分", "備註"]].sort_values(by="日期")
 
@@ -805,66 +824,45 @@ elif app_mode == "衛生組後台":
                         st.dataframe(report.style.format("{:.0f}", subset=numeric_cols).background_gradient(subset=["總成績"], cmap="RdYlGn", vmin=60, vmax=90))
             else: st.info("無資料")
 
-        # --- Tab 2: 違規通知 (v35.0) ---
         with tab2:
             st.write("### 📧 寄送違規通知給導師")
-            
-            # 1. 顯示 SMTP 設定狀態
             if SYSTEM_CONFIG["smtp_email"] and SYSTEM_CONFIG["smtp_password"]:
                 st.success(f"✅ SMTP 設定已就緒 (寄件者: {SYSTEM_CONFIG['smtp_email']})")
-            else:
-                st.warning("⚠️ 尚未設定 SMTP，無法使用自動寄信功能。請至「系統設定」頁面填寫。")
-            
+            else: st.warning("⚠️ 尚未設定 SMTP")
             notify_date = st.date_input("選擇通知日期", datetime.now())
-            
-            # 2. 撈取資料
             if not df.empty:
                 today_data = df[pd.to_datetime(df["日期"]).dt.date == notify_date].copy()
-                
-                # 計算每個班級的總扣分
                 today_summary = today_data.groupby("班級").agg({
                     "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum", 
                     "垃圾內掃原始分": "sum", "垃圾外掃原始分": "sum",
                     "晨間打掃原始分": "sum", "手機人數": "sum",
                     "備註": lambda x: " | ".join(list(x))
                 }).reset_index()
-                
                 today_summary["總扣分"] = (today_summary["內掃原始分"] + today_summary["外掃原始分"] + 
                                          today_summary["垃圾原始分"] + today_summary["垃圾內掃原始分"] + 
                                          today_summary["垃圾外掃原始分"] + today_summary["晨間打掃原始分"] + 
                                          today_summary["手機人數"])
-                
-                # 只保留有扣分的班級
                 violations = today_summary[today_summary["總扣分"] > 0]
-                
-                if violations.empty:
-                    st.info("📅 該日期沒有違規紀錄。")
+                if violations.empty: st.info("📅 該日期沒有違規紀錄。")
                 else:
                     st.write(f"共有 {len(violations)} 個班級有違規紀錄。")
                     st.dataframe(violations[["班級", "總扣分", "備註"]])
-                    
-                    # 3. 準備寄信清單
                     notifications = []
                     for _, row in violations.iterrows():
                         cls_name = row['班級']
                         teacher_email = TEACHER_DICT.get(cls_name)
-                        
                         if teacher_email:
                             subject = f"【衛生組通知】{cls_name} 違規扣分通知 ({notify_date})"
-                            body = f"""導師您好：\n\n貴班於 {notify_date} 經檢查有以下違規事項，特此通知。\n\n違規內容：{row['備註']}\n扣分分數：{row['總扣分']} 分\n\n(此信件由衛生糾察系統自動生成，請勿回覆)"""
+                            body = f"""導師您好：\n\n貴班於 {notify_date} 經檢查有以下違規事項，特此通知。\n\n違規內容：{row['備註']}\n扣分分數：{row['總扣分']} 分\n\n(此信件由系統自動生成)"""
                             notifications.append({"email": teacher_email, "subject": subject, "body": body})
-                    
                     st.write(f"預計寄送 {len(notifications)} 封 Email。")
-                    
                     if st.button("🤖 啟動自動通知 (SMTP)"):
-                        if not notifications:
-                            st.error("沒有可寄送的對象 (可能未設定導師 Email)")
+                        if not notifications: st.error("沒有可寄送的對象")
                         else:
                             err, count = send_batch_email(notifications, SYSTEM_CONFIG["smtp_email"], SYSTEM_CONFIG["smtp_password"])
                             if err: st.error(err)
                             if count > 0: st.success(f"成功寄出 {count} 封郵件！")
 
-        # --- Tab 3: 申訴管理 ---
         with tab3:
             st.write("### 📢 學生申訴案件")
             appeals_df = load_appeals()
@@ -872,6 +870,7 @@ elif app_mode == "衛生組後台":
             if not pending_appeals.empty:
                 for i, row in pending_appeals.iterrows():
                     with st.expander(f"【申訴】{row['日期']} {row['班級']} - 理由：{row['申訴理由']}"):
+                        st.write(f"申請時間：{row['申請時間']}")
                         if "佐證照片" in row and str(row["佐證照片"]) != "nan" and row["佐證照片"]:
                             st.write("**📸 申訴佐證照片：**")
                             appeal_paths = str(row["佐證照片"]).split(";")
@@ -879,7 +878,7 @@ elif app_mode == "衛生組後台":
                             for k, ap in enumerate(appeal_paths):
                                 if os.path.exists(ap): acols[k%3].image(ap, width=150)
                         c1, c2 = st.columns(2)
-                        if c1.button("✅ 核准", key=f"approve_{i}"):
+                        if c1.button("✅ 核准 (撤銷扣分)", key=f"approve_{i}"):
                             delete_entry([row['原始紀錄ID']])
                             real_idx = appeals_df[appeals_df['申請時間'] == row['申請時間']].index[0]
                             update_appeal_status(real_idx, "已核准(撤銷)")
@@ -888,11 +887,11 @@ elif app_mode == "衛生組後台":
                         if c2.button("❌ 駁回", key=f"reject_{i}"):
                             real_idx = appeals_df[appeals_df['申請時間'] == row['申請時間']].index[0]
                             update_appeal_status(real_idx, "已駁回")
+                            st.warning("已駁回。")
                             st.rerun()
             else: st.info("無待處理案件。")
             with st.expander("查看歷史紀錄"): st.dataframe(appeals_df)
 
-        # --- Tab 4: 資料管理 ---
         with tab4:
             st.write("### 🗑️ 批次刪除")
             c1, c2 = st.columns(2)
@@ -906,27 +905,24 @@ elif app_mode == "衛生組後台":
             st.write("### 🛠️ 單筆刪除")
             if not df.empty:
                 df_display = df.sort_values(by="登錄時間", ascending=False).reset_index()
-                options = {row['index']: f"[{'修正' if row['修正'] else '一般'}] {row['日期']} {row['班級']} - {row['備註']}" for i, row in df_display.iterrows()}
+                options = {row['index']: f"[{'修正' if row['修正'] else '一般'}] {row['日期']} {row['班級']} - {row['評分項目']} | 備註: {row['備註']}" for i, row in df_display.iterrows()}
                 selected_indices = st.multiselect("選擇紀錄：", options=options.keys(), format_func=lambda x: options[x])
                 if st.button("🗑️ 確認刪除"):
                     delete_entry(selected_indices)
                     st.success("刪除成功！")
                     st.rerun()
+            else: st.info("無資料")
 
-        # --- Tab 5: 系統設定區 ---
         with tab5:
             st.header("⚙️ 系統設定")
-            
             st.subheader("1. 🔐 密碼與 Email 設定")
             c1, c2 = st.columns(2)
             new_admin_pwd = c1.text_input("管理員密碼", value=SYSTEM_CONFIG["admin_password"], type="password")
             new_team_pwd = c2.text_input("糾察隊通行碼", value=SYSTEM_CONFIG["team_password"])
-            
             st.write("**SMTP 設定 (用於自動寄信)**")
             c3, c4 = st.columns(2)
             smtp_email = c3.text_input("Gmail 帳號", value=SYSTEM_CONFIG.get("smtp_email", ""))
-            smtp_pwd = c4.text_input("應用程式密碼", value=SYSTEM_CONFIG.get("smtp_password", ""), type="password", help="請至 Google 帳戶安全性 -> 應用程式密碼 申請")
-            
+            smtp_pwd = c4.text_input("應用程式密碼", value=SYSTEM_CONFIG.get("smtp_password", ""), type="password")
             if st.button("💾 儲存所有設定"):
                 SYSTEM_CONFIG["admin_password"] = new_admin_pwd
                 SYSTEM_CONFIG["team_password"] = new_team_pwd
@@ -934,33 +930,28 @@ elif app_mode == "衛生組後台":
                 SYSTEM_CONFIG["smtp_password"] = smtp_pwd
                 save_config(SYSTEM_CONFIG)
                 st.success("設定已更新")
-
             st.divider()
-            st.subheader("2. 📂 檔案上傳")
+            st.subheader("2. 📂 檔案上傳設定")
             uploaded_roster = st.file_uploader("更新全校名單", type=["csv"], key="roster_up")
             if uploaded_roster:
                 with open(ROSTER_FILE, "wb") as f: f.write(uploaded_roster.getbuffer())
                 st.success("成功！")
                 st.rerun()
-            
             uploaded_insp = st.file_uploader("更新糾察隊名單", type=["csv"], key="insp_up")
             if uploaded_insp:
                 with open(INSPECTOR_DUTY_FILE, "wb") as f: f.write(uploaded_insp.getbuffer())
                 st.success("成功！")
                 st.rerun()
-
             uploaded_duty = st.file_uploader("上傳晨掃輪值表", type=["csv"], key="duty_up")
             if uploaded_duty:
                 with open(DUTY_FILE, "wb") as f: f.write(uploaded_duty.getbuffer())
                 st.success("成功！")
                 st.rerun()
-            
             uploaded_teacher = st.file_uploader("上傳導師名單", type=["csv"], key="teacher_up")
             if uploaded_teacher:
                 with open(TEACHER_FILE, "wb") as f: f.write(uploaded_teacher.getbuffer())
                 st.success("成功！")
                 st.rerun()
-
             st.divider()
             st.subheader("3. 學期設定")
             current_start = datetime.strptime(SYSTEM_CONFIG["semester_start"], "%Y-%m-%d").date()
@@ -970,7 +961,6 @@ elif app_mode == "衛生組後台":
                 save_config(SYSTEM_CONFIG)
                 st.success("已更新")
 
-        # --- Tab 6: 資料診斷 ---
         with tab6:
             st.header("🩺 資料診斷室")
             if os.path.exists(DUTY_FILE):
