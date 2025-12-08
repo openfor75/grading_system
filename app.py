@@ -24,6 +24,12 @@ INSPECTOR_DUTY_FILE = "糾察隊名單.csv"
 
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 
+# --- Session State 初始化 (v32.0 新增: 用於控制表單重置) ---
+if 'clean_form_key' not in st.session_state:
+    st.session_state.clean_form_key = 0
+if 'trash_form_key' not in st.session_state:
+    st.session_state.trash_form_key = 0
+
 # ==========================================
 # 1. 設定檔與密碼管理
 # ==========================================
@@ -409,23 +415,29 @@ if app_mode == "我是糾察隊 (評分)":
             else: st.error("⚠️ 讀取輪值表失敗。")
 
         elif role == "垃圾/回收檢查":
-            # v31.0: 垃圾評分 - 直覺勾選版
+            # v32.0: 垃圾評分 - 一鍵刷新版
             st.info(f"📅 第 {week_num} 週 (垃圾/回收評分)")
             
-            trash_category = st.selectbox("1. 請選擇違規項目", ["一般垃圾", "紙類", "網袋", "其他回收"])
+            c_sel, c_btn = st.columns([3, 1])
+            with c_sel:
+                trash_category = st.selectbox("1. 請選擇違規項目", ["一般垃圾", "紙類", "網袋", "其他回收"])
+            with c_btn:
+                st.write("")
+                st.write("")
+                if st.button("🔄 重置表格", use_container_width=True):
+                    st.session_state.trash_form_key += 1
+                    st.rerun()
             
             st.markdown(f"### 📋 全校違規登記表 ({trash_category})")
             st.info("請直接在違規項目打勾 (✅ = 扣分)")
             
-            # 建立資料表：班級 + 2個勾選框
-            trash_data = [
-                {"班級": cls, "無簽名": False, "分類錯": False} 
-                for cls in all_classes
-            ]
+            # 使用動態 Key
+            trash_data = [{"班級": cls, "無簽名": False, "分類錯": False} for cls in all_classes]
             trash_df_init = pd.DataFrame(trash_data)
             
             edited_trash_df = st.data_editor(
                 trash_df_init,
+                key=f"trash_editor_{st.session_state.trash_form_key}", # 動態Key
                 column_config={
                     "班級": st.column_config.TextColumn("班級", disabled=True),
                     "無簽名": st.column_config.CheckboxColumn("❌ 無簽名", default=False),
@@ -443,32 +455,47 @@ if app_mode == "我是糾察隊 (評分)":
             else:
                 class_options = all_classes
                 st.caption("ℹ️ 您未被指定特定班級，顯示全校列表。")
-            selected_class = st.selectbox("被登記班級", class_options)
+            
+            # v32.0: 內外掃一鍵刷新
+            c_sel_cls, c_btn_cls = st.columns([3, 1])
+            with c_sel_cls:
+                selected_class = st.selectbox("被登記班級", class_options)
+            with c_btn_cls:
+                st.write("")
+                st.write("")
+                if st.button("🔄 重置表單", use_container_width=True):
+                    st.session_state.clean_form_key += 1
+                    st.rerun()
+            
             st.info(f"📅 第 {week_num} 週")
 
-        with st.form("scoring_form"):
+        # 使用 form
+        with st.form("scoring_form", clear_on_submit=True): # v32.0: 開啟送出後自動清除
             in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
             is_perfect = False
             
+            # 使用動態 Key 給所有輸入框
+            k_suffix = st.session_state.clean_form_key
+            
             if role == "內掃檢查":
-                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True)
+                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True, key=f"radio_{k_suffix}")
                 if check_status == "❌ 發現違規":
                     st.subheader("違規事項登錄")
-                    in_score = st.number_input("🧹 內掃扣分", min_value=0, step=1)
-                    note = st.text_input("違規說明", placeholder="例：黑板未擦")
-                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
+                    in_score = st.number_input("🧹 內掃扣分", min_value=0, step=1, key=f"in_score_{k_suffix}")
+                    note = st.text_input("違規說明", placeholder="例：黑板未擦", key=f"note_{k_suffix}")
+                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1, key=f"phone_{k_suffix}")
                 else:
                     is_perfect = True
                     st.success("🎉 太棒了！請上傳照片作為嘉獎佐證。")
                     note = "【優良】環境整潔"
 
             elif role == "外掃檢查":
-                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True)
+                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True, key=f"radio_out_{k_suffix}")
                 if check_status == "❌ 發現違規":
                     st.subheader("違規事項登錄")
-                    out_score = st.number_input("🍂 外掃扣分", min_value=0, step=1)
-                    note = st.text_input("違規說明", placeholder="例：走廊有垃圾")
-                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
+                    out_score = st.number_input("🍂 外掃扣分", min_value=0, step=1, key=f"out_score_{k_suffix}")
+                    note = st.text_input("違規說明", placeholder="例：走廊有垃圾", key=f"note_out_{k_suffix}")
+                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1, key=f"phone_out_{k_suffix}")
                 else:
                     is_perfect = True
                     st.success("🎉 太棒了！請上傳照片作為嘉獎佐證。")
@@ -481,13 +508,13 @@ if app_mode == "我是糾察隊 (評分)":
 
             st.write("")
             if role != "垃圾/回收檢查" and role != "晨間打掃":
-                is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將覆蓋舊紀錄)")
+                is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將覆蓋舊紀錄)", key=f"fix_{k_suffix}")
             else:
                 is_correction = False
 
             uploaded_files = None
             if role in ["內掃檢查", "外掃檢查"]:
-                uploaded_files = st.file_uploader("📸 上傳照片 (違規或優良佐證)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+                uploaded_files = st.file_uploader("📸 上傳照片 (違規或優良佐證)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key=f"file_{k_suffix}")
             
             submitted = st.form_submit_button("送出評分", use_container_width=True)
 
@@ -531,13 +558,11 @@ if app_mode == "我是糾察隊 (評分)":
                             st.success(f"✅ 已登記 {count} 位未到學生！")
 
                 elif role == "垃圾/回收檢查":
-                    # v31.0 垃圾勾選邏輯
                     if edited_trash_df is None:
                         st.error("無資料")
                     else:
                         saved_count = 0
                         for _, row in edited_trash_df.iterrows():
-                            # 累加分數
                             score = 0
                             reasons = []
                             if row["無簽名"]: 
@@ -555,7 +580,7 @@ if app_mode == "我是糾察隊 (評分)":
                                     "日期": input_date, "週次": week_num, "班級": row["班級"],
                                     "評分項目": role, "檢查人員": inspector_name,
                                     "內掃原始分":0, "外掃原始分":0, 
-                                    "垃圾原始分": score, # 存入總分
+                                    "垃圾原始分": score, 
                                     "晨間打掃原始分":0, "手機人數":0,
                                     "垃圾內掃原始分": 0, "垃圾外掃原始分": 0,
                                     "備註": note_str, "照片路徑": "", "違規細項": trash_category,
@@ -565,7 +590,11 @@ if app_mode == "我是糾察隊 (評分)":
                                 save_entry(entry)
                                 saved_count += 1
                         
-                        if saved_count > 0: st.success(f"✅ 已成功登記 {saved_count} 筆違規紀錄！")
+                        # v32.0: 送出後強制刷新表格
+                        st.session_state.trash_form_key += 1
+                        if saved_count > 0: 
+                            st.success(f"✅ 已成功登記 {saved_count} 筆違規紀錄！(表格已重置)")
+                            st.rerun()
                         else: st.info("👍 沒有任何班級違規。")
 
                 else:
@@ -583,7 +612,12 @@ if app_mode == "我是糾察隊 (評分)":
                         "修正": is_correction, "晨掃未到者": ""
                     }
                     save_entry(entry)
-                    st.success(f"✅ 登記完成！")
+                    # v32.0: 表單送出後會自動清空 (因為 set clear_on_submit=True)
+                    st.success(f"✅ 登記完成！(表單已重置)")
+                    # 額外 increment key 確保萬無一失
+                    st.session_state.clean_form_key += 1 
+                    st.rerun()
+
     else:
         st.info("👈 請在左側輸入通行碼以開始評分")
 
@@ -618,10 +652,9 @@ elif app_mode == "我是班上衛生股長":
                             msg = []
                             if row["內掃原始分"] > 0: msg.append(f"內掃扣 {row['內掃原始分']}")
                             if row["外掃原始分"] > 0: msg.append(f"外掃扣 {row['外掃原始分']}")
-                            # 顯示所有垃圾相關扣分
-                            trash_all = row["垃圾原始分"] + row["垃圾內掃原始分"] + row["垃圾外掃原始分"]
-                            if trash_all > 0: msg.append(f"垃圾/回收扣 {trash_all}")
-                            
+                            if row["垃圾內掃原始分"] > 0: msg.append(f"內掃垃圾扣 {row['垃圾內掃原始分']}")
+                            if row["垃圾外掃原始分"] > 0: msg.append(f"外掃垃圾扣 {row['垃圾外掃原始分']}")
+                            if row["垃圾原始分"] > 0: msg.append(f"垃圾扣 {row['垃圾原始分']}")
                             if row["晨間打掃原始分"] > 0: msg.append(f"晨掃扣 {row['晨間打掃原始分']}")
                             if row["手機人數"] > 0: msg.append(f"手機 {row['手機人數']}人")
                             if msg: st.error(" | ".join(msg))
@@ -725,7 +758,7 @@ elif app_mode == "衛生組後台":
                             
                             daily_group["內掃結算"] = daily_group["內掃原始分"].apply(lambda x: min(x, 2))
                             daily_group["外掃結算"] = daily_group["外掃原始分"].apply(lambda x: min(x, 2))
-                            # v31.0: 垃圾總分 (相容所有版本) 上限2分
+                            # v32.0: 垃圾總分上限
                             daily_group["垃圾結算"] = (daily_group["垃圾原始分"] + daily_group["垃圾內掃原始分"] + daily_group["垃圾外掃原始分"]).apply(lambda x: min(x, 2))
                             
                             daily_group["晨間打掃結算"] = daily_group["晨間打掃原始分"]
@@ -750,7 +783,6 @@ elif app_mode == "衛生組後台":
                                 reasons = []
                                 if row["內掃原始分"] > 0: reasons.append(f"內掃({row['內掃原始分']})")
                                 if row["外掃原始分"] > 0: reasons.append(f"外掃({row['外掃原始分']})")
-                                # 垃圾合併顯示
                                 trash_s = row["垃圾原始分"] + row["垃圾內掃原始分"] + row["垃圾外掃原始分"]
                                 if trash_s > 0: reasons.append(f"垃圾({trash_s})")
                                 if row["晨間打掃原始分"] > 0: reasons.append(f"晨掃({row['晨間打掃原始分']})")
