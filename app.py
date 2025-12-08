@@ -177,6 +177,9 @@ def load_inspector_csv():
         role_col = next((c for c in df.columns if "負責" in c or "項目" in c or "職位" in c), None)
         class_scope_col = next((c for c in df.columns if "班級" in c or "範圍" in c), None)
         
+        debug_info["name_col"] = name_col
+        debug_info["role_col"] = role_col
+        
         if name_col:
             debug_info["status"] = "success"
             for _, row in df.iterrows():
@@ -201,7 +204,10 @@ def load_inspector_csv():
                     if "晨" in s_raw_role: allowed_roles.append("晨間打掃")
                     if "內掃" in s_raw_role: allowed_roles.append("內掃檢查")
                 
-                if not allowed_roles: allowed_roles = ["內掃檢查"]
+                if not allowed_roles: 
+                    allowed_roles = ["內掃檢查"]
+                    s_raw_role += " (未識別)"
+
                 label = f"{s_name}"
                 if s_id: label = f"{s_name} ({s_id})"
                 
@@ -406,36 +412,37 @@ if app_mode == "我是糾察隊 (評分)":
             else: st.error("⚠️ 讀取輪值表失敗。")
 
         elif role == "垃圾/回收檢查":
-            # v29.0: 垃圾評分大表格 (內/外掃合併)
+            # v30.0: 垃圾評分重製版 (不分區，直接填表)
             st.info(f"📅 第 {week_num} 週 (垃圾/回收評分)")
             
-            # Step 1: 選種類
             trash_category = st.selectbox("1. 請選擇違規項目", ["一般垃圾", "紙類", "網袋", "其他回收"])
             
-            st.markdown(f"### 📋 全校 {trash_category} 違規登記表")
-            st.caption("說明：Ⓐ無簽名 Ⓑ分類錯誤 Ⓒ態度不佳")
+            st.markdown(f"### 📋 全校違規登記表 ({trash_category})")
+            st.info("請點選下方欄位選擇違規事項 (若無違規請留空)。")
             
-            # 準備空表格 (欄位: 班級, 內-A, 內-B, 內-C, 外-A, 外-B, 外-C)
-            trash_data = [
-                {
-                    "班級": cls, 
-                    "內-A": False, "內-B": False, "內-C": False,
-                    "外-A": False, "外-B": False, "外-C": False
-                } 
-                for cls in all_classes
-            ]
+            # 選項
+            vio_options = [None, "無簽名", "分類錯"]
+            
+            # 建立空的資料表結構
+            trash_data = [{"班級": cls, "扣分1": None, "扣分2": None} for cls in all_classes]
             trash_df_init = pd.DataFrame(trash_data)
             
             edited_trash_df = st.data_editor(
                 trash_df_init,
                 column_config={
                     "班級": st.column_config.TextColumn("班級", disabled=True),
-                    "內-A": st.column_config.CheckboxColumn("內-Ⓐ無簽", default=False),
-                    "內-B": st.column_config.CheckboxColumn("內-Ⓑ分類", default=False),
-                    "內-C": st.column_config.CheckboxColumn("內-Ⓒ態度", default=False),
-                    "外-A": st.column_config.CheckboxColumn("外-Ⓐ無簽", default=False),
-                    "外-B": st.column_config.CheckboxColumn("外-Ⓑ分類", default=False),
-                    "外-C": st.column_config.CheckboxColumn("外-Ⓒ態度", default=False),
+                    "扣分1": st.column_config.SelectboxColumn(
+                        "扣分1 (1分)",
+                        help="選擇違規原因",
+                        width="medium",
+                        options=vio_options
+                    ),
+                    "扣分2": st.column_config.SelectboxColumn(
+                        "扣分2 (1分)",
+                        help="選擇第二個違規原因",
+                        width="medium",
+                        options=vio_options
+                    )
                 },
                 hide_index=True,
                 height=600,
@@ -537,52 +544,38 @@ if app_mode == "我是糾察隊 (評分)":
                             st.success(f"✅ 已登記 {count} 位未到學生！")
 
                 elif role == "垃圾/回收檢查":
-                    # v29.0 垃圾大表處理邏輯
+                    # v30.0 垃圾下拉選單處理
                     if edited_trash_df is None:
                         st.error("無資料")
                     else:
                         saved_count = 0
                         for _, row in edited_trash_df.iterrows():
-                            # --- 1. 處理內掃違規 ---
-                            inner_vios = []
-                            if row["內-A"]: inner_vios.append("Ⓐ無簽名")
-                            if row["內-B"]: inner_vios.append("Ⓑ分類錯誤")
-                            if row["內-C"]: inner_vios.append("Ⓒ態度不佳")
+                            # 檢查扣分欄位
+                            v1 = row["扣分1"]
+                            v2 = row["扣分2"]
                             
-                            if inner_vios:
-                                score = len(inner_vios) # 1個1分
-                                detail_str = ",".join(inner_vios)
-                                note_str = f"內掃-{trash_category}:{detail_str}"
+                            score = 0
+                            reasons = []
+                            if v1: 
+                                score += 1
+                                reasons.append(v1)
+                            if v2: 
+                                score += 1
+                                reasons.append(v2)
+                            
+                            if score > 0:
+                                detail_str = "、".join(reasons)
+                                note_str = f"{trash_category}: {detail_str}"
                                 
+                                # 存入「垃圾原始分」，後台會自動加總並計算上限
                                 entry = {
                                     "日期": input_date, "週次": week_num, "班級": row["班級"],
                                     "評分項目": role, "檢查人員": inspector_name,
-                                    "內掃原始分":0, "外掃原始分":0, "垃圾原始分":0, "晨間打掃原始分":0, "手機人數":0,
-                                    "垃圾內掃原始分": score, "垃圾外掃原始分": 0,
-                                    "備註": note_str, "照片路徑": "", "違規細項": detail_str,
-                                    "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    "修正": False, "晨掃未到者": ""
-                                }
-                                save_entry(entry)
-                                saved_count += 1
-                            
-                            # --- 2. 處理外掃違規 ---
-                            outer_vios = []
-                            if row["外-A"]: outer_vios.append("Ⓐ無簽名")
-                            if row["外-B"]: outer_vios.append("Ⓑ分類錯誤")
-                            if row["外-C"]: outer_vios.append("Ⓒ態度不佳")
-                            
-                            if outer_vios:
-                                score = len(outer_vios)
-                                detail_str = ",".join(outer_vios)
-                                note_str = f"外掃-{trash_category}:{detail_str}"
-                                
-                                entry = {
-                                    "日期": input_date, "週次": week_num, "班級": row["班級"],
-                                    "評分項目": role, "檢查人員": inspector_name,
-                                    "內掃原始分":0, "外掃原始分":0, "垃圾原始分":0, "晨間打掃原始分":0, "手機人數":0,
-                                    "垃圾內掃原始分": 0, "垃圾外掃原始分": score,
-                                    "備註": note_str, "照片路徑": "", "違規細項": detail_str,
+                                    "內掃原始分":0, "外掃原始分":0, 
+                                    "垃圾原始分": score, # 存入總分
+                                    "晨間打掃原始分":0, "手機人數":0,
+                                    "垃圾內掃原始分": 0, "垃圾外掃原始分": 0, # 不分區，填0
+                                    "備註": note_str, "照片路徑": "", "違規細項": trash_category,
                                     "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                     "修正": False, "晨掃未到者": ""
                                 }
@@ -590,7 +583,7 @@ if app_mode == "我是糾察隊 (評分)":
                                 saved_count += 1
                         
                         if saved_count > 0: st.success(f"✅ 已成功登記 {saved_count} 筆違規紀錄！")
-                        else: st.info("👍 沒有勾選任何違規。")
+                        else: st.info("👍 沒有任何班級違規。")
 
                 else:
                     final_note = note
@@ -642,8 +635,10 @@ elif app_mode == "我是班上衛生股長":
                             msg = []
                             if row["內掃原始分"] > 0: msg.append(f"內掃扣 {row['內掃原始分']}")
                             if row["外掃原始分"] > 0: msg.append(f"外掃扣 {row['外掃原始分']}")
-                            if row["垃圾內掃原始分"] > 0: msg.append(f"內掃垃圾扣 {row['垃圾內掃原始分']}")
-                            if row["垃圾外掃原始分"] > 0: msg.append(f"外掃垃圾扣 {row['垃圾外掃原始分']}")
+                            # 合併垃圾顯示
+                            trash_total = row["垃圾原始分"] + row["垃圾內掃原始分"] + row["垃圾外掃原始分"]
+                            if trash_total > 0: msg.append(f"垃圾/回收扣 {trash_total}")
+                            
                             if row["晨間打掃原始分"] > 0: msg.append(f"晨掃扣 {row['晨間打掃原始分']}")
                             if row["手機人數"] > 0: msg.append(f"手機 {row['手機人數']}人")
                             if msg: st.error(" | ".join(msg))
@@ -747,13 +742,13 @@ elif app_mode == "衛生組後台":
                             
                             daily_group["內掃結算"] = daily_group["內掃原始分"].apply(lambda x: min(x, 2))
                             daily_group["外掃結算"] = daily_group["外掃原始分"].apply(lambda x: min(x, 2))
-                            daily_group["垃圾內掃結算"] = (daily_group["垃圾原始分"] + daily_group["垃圾內掃原始分"]).apply(lambda x: min(x, 2))
-                            daily_group["垃圾外掃結算"] = daily_group["垃圾外掃原始分"].apply(lambda x: min(x, 2))
+                            # v30.0: 垃圾總分 (舊制+新制) 上限2分
+                            daily_group["垃圾結算"] = (daily_group["垃圾原始分"] + daily_group["垃圾內掃原始分"] + daily_group["垃圾外掃原始分"]).apply(lambda x: min(x, 2))
+                            
                             daily_group["晨間打掃結算"] = daily_group["晨間打掃原始分"]
                             daily_group["手機扣分"] = daily_group["手機人數"] * 1
                             
-                            daily_group["當日總扣分"] = (daily_group["內掃結算"] + daily_group["外掃結算"] + 
-                                                       daily_group["垃圾內掃結算"] + daily_group["垃圾外掃結算"] + 
+                            daily_group["當日總扣分"] = (daily_group["內掃結算"] + daily_group["外掃結算"] + daily_group["垃圾結算"] + 
                                                        daily_group["晨間打掃結算"] + daily_group["手機扣分"])
                             
                             class_score_df = pd.DataFrame(all_classes, columns=["班級"])
@@ -772,8 +767,11 @@ elif app_mode == "衛生組後台":
                                 reasons = []
                                 if row["內掃原始分"] > 0: reasons.append(f"內掃({row['內掃原始分']})")
                                 if row["外掃原始分"] > 0: reasons.append(f"外掃({row['外掃原始分']})")
-                                if row["垃圾內掃原始分"] > 0: reasons.append(f"垃圾內({row['垃圾內掃原始分']})")
-                                if row["垃圾外掃原始分"] > 0: reasons.append(f"垃圾外({row['垃圾外掃原始分']})")
+                                
+                                # 合併顯示垃圾
+                                trash_sum = row["垃圾原始分"] + row["垃圾內掃原始分"] + row["垃圾外掃原始分"]
+                                if trash_sum > 0: reasons.append(f"垃圾({trash_sum})")
+                                
                                 if row["晨間打掃原始分"] > 0: reasons.append(f"晨掃({row['晨間打掃原始分']})")
                                 if row["手機人數"] > 0: reasons.append(f"手機({row['手機人數']})")
                                 if "【優良】" in str(row["備註"]): reasons.append("✨優良")
