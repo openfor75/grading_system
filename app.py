@@ -120,19 +120,23 @@ for dept, count in dept_config.items():
         for i in range(count):
             all_classes.append(f"{dept_short}{g_num}{class_labels[i]}")
 
-# --- 資料處理 ---
+# --- 資料處理 (v10.0 更新：加入 修正 欄位) ---
 def load_data():
     if os.path.exists(FILE_PATH):
         df = pd.read_csv(FILE_PATH)
-        expected_cols = ["日期", "週次", "班級", "評分項目", "檢查人員", "內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數", "備註", "照片路徑", "登錄時間"]
+        # 增加「修正」欄位 (True/False)
+        expected_cols = ["日期", "週次", "班級", "評分項目", "檢查人員", "內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數", "備註", "照片路徑", "登錄時間", "修正"]
         for col in expected_cols:
-            if col not in df.columns: df[col] = 0 if "分" in col or "人數" in col else ""
+            if col == "修正":
+                if col not in df.columns: df[col] = False # 舊資料預設為 False
+            elif col not in df.columns: 
+                df[col] = 0 if "分" in col or "人數" in col else ""
         return df
     else:
         return pd.DataFrame(columns=[
             "日期", "週次", "班級", "評分項目", "檢查人員",
             "內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數", 
-            "備註", "照片路徑", "登錄時間"
+            "備註", "照片路徑", "登錄時間", "修正"
         ])
 
 def save_entry(new_entry):
@@ -210,9 +214,9 @@ if app_mode == "我是糾察隊 (評分)":
             morning_score = st.number_input("扣分分數", min_value=0, step=1)
             note = st.text_input("違規說明", placeholder="例如：未進行打掃")
 
-        # --- v9.0 新增：修正資料勾選 ---
+        # 修正資料勾選
         st.write("")
-        is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，請通知老師刪除上一筆錯誤紀錄)")
+        is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將自動覆蓋今日同項目的舊紀錄)")
 
         uploaded_files = st.file_uploader("📸 上傳違規照片 (可多選)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
         
@@ -232,10 +236,10 @@ if app_mode == "我是糾察隊 (評分)":
             
             img_path_str = ";".join(saved_paths)
 
-            # 如果是修正資料，自動在備註加標籤
+            # 如果是修正資料，備註加註
             final_note = note
-            if is_correction:
-                final_note = f"【申請更正】 {note}"
+            if is_correction and "【修正】" not in note:
+                final_note = f"【修正】 {note}"
 
             entry = {
                 "日期": input_date, "週次": week_num, "班級": selected_class,
@@ -244,10 +248,11 @@ if app_mode == "我是糾察隊 (評分)":
                 "垃圾原始分": trash_score, "晨間打掃原始分": morning_score,
                 "手機人數": phone_count,
                 "備註": final_note, "照片路徑": img_path_str,
-                "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "修正": is_correction # 存入資料庫
             }
             save_entry(entry)
-            st.success(f"✅ 登記完成！")
+            st.success(f"✅ 登記完成！{' (已標記為修正單)' if is_correction else ''}")
 
 # ------------------------------------------
 # 模式二：班上衛生股長
@@ -260,12 +265,18 @@ elif app_mode == "我是班上衛生股長":
         class_df = df[df["班級"] == search_class].copy()
         
         if not class_df.empty:
-            class_df = class_df.sort_values(by="日期", ascending=False)
+            class_df = class_df.sort_values(by="登錄時間", ascending=False) # 讓最新的在最上面
             st.subheader(f"📅 {search_class} 近期紀錄")
+            
+            # --- 查詢介面也做簡單的「修正標示」 ---
             for index, row in class_df.iterrows():
                 total_raw = row["內掃原始分"] + row["外掃原始分"] + row["垃圾原始分"] + row["晨間打掃原始分"] + row["手機人數"]
-                if total_raw > 0:
-                    with st.expander(f"[第{row['週次']}週] {row['日期']} - {row['評分項目']} (扣分詳情)"):
+                
+                # 顯示標題
+                title_prefix = "🔴 [修正單] " if row["修正"] else ""
+                
+                if total_raw >= 0: # 顯示所有紀錄 (包含0分紀錄，確認有檢查)
+                    with st.expander(f"{title_prefix}[第{row['週次']}週] {row['日期']} - {row['評分項目']} (扣分詳情)"):
                         c1, c2 = st.columns([3, 2])
                         with c1:
                             st.write(f"**違規：** {row['備註']}")
@@ -275,8 +286,12 @@ elif app_mode == "我是班上衛生股長":
                             if row["垃圾原始分"] > 0: msg.append(f"垃圾扣 {row['垃圾原始分']}")
                             if row["晨間打掃原始分"] > 0: msg.append(f"晨間打掃扣 {row['晨間打掃原始分']}")
                             if row["手機人數"] > 0: msg.append(f"手機 {row['手機人數']}人")
-                            st.error(" | ".join(msg))
-                            st.caption(f"檢查人員：{row['檢查人員']}")
+                            if msg:
+                                st.error(" | ".join(msg))
+                            else:
+                                st.success("無扣分")
+                                
+                            st.caption(f"檢查人員：{row['檢查人員']} | 時間：{row['登錄時間']}")
                         with c2:
                             path_str = str(row["照片路徑"])
                             if path_str and path_str != "nan":
@@ -301,9 +316,9 @@ elif app_mode == "衛生組後台":
     if password == "1234":
         df = load_data()
         
-        tab1, tab2, tab3 = st.tabs(["📊 成績報表", "🛠️ 資料修正", "⚙️ 系統設定"])
+        tab1, tab2, tab3 = st.tabs(["📊 成績報表", "🛠️ 資料管理", "⚙️ 系統設定"])
         
-        # --- Tab 1: 報表區 ---
+        # --- Tab 1: 報表區 (v10.0 核心升級：智慧篩選) ---
         with tab1:
             if not df.empty:
                 available_weeks = sorted(df["週次"].unique())
@@ -313,92 +328,109 @@ elif app_mode == "衛生組後台":
                     selected_week = st.selectbox("選擇結算週次", available_weeks, index=len(available_weeks)-1)
                     week_df = df[df["週次"] == selected_week]
                     
+                    # 假日提醒
                     holidays_df = load_holidays()
                     week_dates = week_df["日期"].unique()
                     week_holidays = holidays_df[holidays_df["日期"].isin(week_dates)]
-                    
                     if not week_holidays.empty:
                         st.info("ℹ️ 本週包含假日/停課日：")
                         st.dataframe(week_holidays, hide_index=True)
 
-                    daily_group = week_df.groupby(["日期", "班級"]).agg({
-                        "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum", "晨間打掃原始分": "sum",
-                        "手機人數": "sum", 
-                        "備註": lambda x: " | ".join([str(s) for s in x if str(s) not in ["", "nan", "None"]]),
-                        "檢查人員": lambda x: ", ".join(set([str(s) for s in x if str(s) not in ["", "nan"]]))
-                    }).reset_index()
+                    # === v10.0 智慧資料清洗 (Smart Logic) ===
+                    st.markdown("##### ⚙️ 運算邏輯：若當日有「修正單」，將自動忽略該項目的舊紀錄。")
                     
-                    daily_group["內掃結算"] = daily_group["內掃原始分"].apply(lambda x: min(x, 2))
-                    daily_group["外掃結算"] = daily_group["外掃原始分"].apply(lambda x: min(x, 2))
-                    daily_group["垃圾結算"] = daily_group["垃圾原始分"].apply(lambda x: min(x, 2))
-                    daily_group["晨間打掃結算"] = daily_group["晨間打掃原始分"]
-                    daily_group["手機扣分"] = daily_group["手機人數"] * 1
+                    # 1. 先照時間倒序 (最新的在上面)
+                    week_df_sorted = week_df.sort_values(by="登錄時間", ascending=False)
                     
-                    daily_group["當日總扣分"] = (daily_group["內掃結算"] + daily_group["外掃結算"] + 
-                                               daily_group["垃圾結算"] + daily_group["晨間打掃結算"] + 
-                                               daily_group["手機扣分"])
+                    # 2. 建立清洗後的清單
+                    cleaned_rows = []
                     
-                    final_deductions = daily_group.groupby("班級")["當日總扣分"].sum().reset_index()
-                    class_score_df = pd.DataFrame(all_classes, columns=["班級"])
-                    report = pd.merge(class_score_df, final_deductions, on="班級", how="left").fillna(0)
-                    report["本週成績"] = 90 - report["當日總扣分"]
-                    report = report.sort_values(by="本週成績", ascending=False)
+                    # 3. 依照 [日期, 班級, 評分項目] 分組
+                    groups = week_df_sorted.groupby(["日期", "班級", "評分項目"])
                     
-                    import io
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        report.to_excel(writer, index=False, sheet_name='總成績')
-                        daily_group.to_excel(writer, index=False, sheet_name='每日統計')
-                        if not week_holidays.empty:
-                            week_holidays.to_excel(writer, index=False, sheet_name='本週假日紀錄')
+                    for name, group in groups:
+                        # 檢查這組裡面有沒有人勾選「修正」
+                        if group["修正"].any():
+                            # 如果有修正單，只取「最新的那一筆修正單」(因為我們已經倒序過了，取第一筆 True)
+                            best_entry = group[group["修正"] == True].iloc[0]
+                            cleaned_rows.append(best_entry)
+                        else:
+                            # 如果沒有修正單，代表是多次違規，全部保留
+                            for _, row in group.iterrows():
+                                cleaned_rows.append(row)
+                                
+                    # 4. 轉回 DataFrame 進行後續計算
+                    cleaned_df = pd.DataFrame(cleaned_rows)
                     
-                    st.download_button(
-                        label="📥 下載 Excel 結算報表",
-                        data=output.getvalue(),
-                        file_name=f"第{selected_week}週_衛生糾察總表.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-                    
-                    st.dataframe(report.style.format({"當日總扣分": "{:.0f}", "本週成績": "{:.0f}"})
-                                .background_gradient(subset=["本週成績"], cmap="RdYlGn", vmin=60, vmax=90))
+                    if cleaned_df.empty:
+                        st.warning("本週無有效數據")
+                    else:
+                        # === 以下邏輯使用 cleaned_df 計算 ===
+                        daily_group = cleaned_df.groupby(["日期", "班級"]).agg({
+                            "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum", "晨間打掃原始分": "sum",
+                            "手機人數": "sum", 
+                            "備註": lambda x: " | ".join([str(s) for s in x if str(s) not in ["", "nan", "None"]]),
+                            "檢查人員": lambda x: ", ".join(set([str(s) for s in x if str(s) not in ["", "nan"]]))
+                        }).reset_index()
+                        
+                        daily_group["內掃結算"] = daily_group["內掃原始分"].apply(lambda x: min(x, 2))
+                        daily_group["外掃結算"] = daily_group["外掃原始分"].apply(lambda x: min(x, 2))
+                        daily_group["垃圾結算"] = daily_group["垃圾原始分"].apply(lambda x: min(x, 2))
+                        daily_group["晨間打掃結算"] = daily_group["晨間打掃原始分"]
+                        daily_group["手機扣分"] = daily_group["手機人數"] * 1
+                        
+                        daily_group["當日總扣分"] = (daily_group["內掃結算"] + daily_group["外掃結算"] + 
+                                                   daily_group["垃圾結算"] + daily_group["晨間打掃結算"] + 
+                                                   daily_group["手機扣分"])
+                        
+                        final_deductions = daily_group.groupby("班級")["當日總扣分"].sum().reset_index()
+                        class_score_df = pd.DataFrame(all_classes, columns=["班級"])
+                        report = pd.merge(class_score_df, final_deductions, on="班級", how="left").fillna(0)
+                        report["本週成績"] = 90 - report["當日總扣分"]
+                        report = report.sort_values(by="本週成績", ascending=False)
+                        
+                        import io
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            report.to_excel(writer, index=False, sheet_name='總成績')
+                            daily_group.to_excel(writer, index=False, sheet_name='每日統計(已清洗)')
+                            week_df.to_excel(writer, index=False, sheet_name='原始輸入(含錯誤)') # 保留原始資料供查驗
+                            if not week_holidays.empty:
+                                week_holidays.to_excel(writer, index=False, sheet_name='本週假日紀錄')
+                        
+                        st.download_button(
+                            label="📥 下載 Excel 結算報表 (智慧修正版)",
+                            data=output.getvalue(),
+                            file_name=f"第{selected_week}週_衛生糾察總表.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                        
+                        st.dataframe(report.style.format({"當日總扣分": "{:.0f}", "本週成績": "{:.0f}"})
+                                    .background_gradient(subset=["本週成績"], cmap="RdYlGn", vmin=60, vmax=90))
 
-        # --- Tab 2: 修正區 (v9.0 優化) ---
+        # --- Tab 2: 資料管理 (手動刪除區) ---
         with tab2:
-            st.write("勾選要刪除的項目，然後點擊下方的刪除按鈕。")
+            st.write("原則上系統會自動處理修正單，若您仍需手動刪除資料，請在此操作。")
             
             if not df.empty:
-                # --- v9.0 新增篩選器 ---
-                filter_correction = st.checkbox("🔍 只顯示包含【申請更正】的資料")
+                # 簡單的刪除介面
+                df_display = df.sort_values(by="登錄時間", ascending=False).reset_index() # 顯示方便
+                # 為了能正確刪除，我們要保留原本的 index
                 
-                # 建立顯示用的 DataFrame
-                display_df = df.copy()
-                if filter_correction:
-                    # 篩選備註含有 "【申請更正】" 的列
-                    display_df = display_df[display_df["備註"].astype(str).str.contains("【申請更正】", na=False)]
+                options = {row['index']: f"[{'修正單' if row['修正'] else '一般'}] {row['日期']} {row['班級']} - {row['評分項目']} (扣 {row['內掃原始分']+row['外掃原始分']+row['垃圾原始分']+row['晨間打掃原始分']} 分) | 備註: {row['備註']}" for i, row in df_display.iterrows()}
                 
-                if not display_df.empty:
-                    # 選單使用 display_df 來呈現，但 key (index) 還是要對應回原始 df
-                    options = {i: f"{row['日期']} {row['班級']} - {row['評分項目']} (扣 {row['內掃原始分']+row['外掃原始分']+row['垃圾原始分']+row['晨間打掃原始分']} 分) | 備註: {row['備註']}" for i, row in display_df.iterrows()}
-                    
-                    selected_indices = st.multiselect(
-                        "請選擇要刪除的紀錄：",
-                        options=options.keys(),
-                        format_func=lambda x: f"[{x}] {options[x]}"
-                    )
-                    
-                    if st.button("🗑️ 確認刪除選取項目"):
-                        if selected_indices:
-                            delete_entry(selected_indices)
-                            st.success("刪除成功！")
-                            st.rerun()
-                        else:
-                            st.warning("請先選擇要刪除的項目")
-                else:
-                    if filter_correction:
-                        st.info("目前沒有標記為【申請更正】的資料。")
-                    else:
-                        st.info("無資料")
+                selected_indices = st.multiselect(
+                    "選擇要永久刪除的紀錄：",
+                    options=options.keys(),
+                    format_func=lambda x: options[x]
+                )
+                
+                if st.button("🗑️ 確認永久刪除"):
+                    if selected_indices:
+                        delete_entry(selected_indices)
+                        st.success("刪除成功！")
+                        st.rerun()
             else:
                 st.info("無資料")
 
@@ -425,8 +457,6 @@ elif app_mode == "衛生組後台":
                 if h_reason:
                     save_holiday(h_date, h_reason)
                     st.success(f"已新增：{h_date}")
-                else:
-                    st.error("請輸入原因")
             
             holidays = load_holidays()
             if not holidays.empty:
@@ -448,17 +478,13 @@ elif app_mode == "衛生組後台":
             current_list = current_inspectors[target_list_key]
             
             col_add1, col_add2 = st.columns([3, 1])
-            new_member = col_add1.text_input("輸入新人員 (建議格式：學號 職稱 姓名)", placeholder="例如：123456 衛糾99 王小明")
+            new_member = col_add1.text_input("輸入新人員", placeholder="學號 職稱 姓名")
             if col_add2.button("➕ 加入名單"):
                 if new_member and new_member not in current_list:
                     current_list.append(new_member)
                     save_inspectors(current_inspectors["hygiene"], current_inspectors["env"])
                     st.success(f"已加入：{new_member}")
                     st.rerun()
-                elif new_member in current_list:
-                    st.warning("該人員已在名單中")
-                else:
-                    st.warning("請輸入內容")
             
             st.write("移除人員：")
             members_to_remove = st.multiselect("選擇要移除的人員", current_list)
