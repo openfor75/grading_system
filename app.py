@@ -89,10 +89,16 @@ def load_roster_dict(csv_path=ROSTER_FILE):
 
 ROSTER_DICT, ROSTER_DEBUG = load_roster_dict()
 
-# --- B. 晨掃輪值表讀取 ---
+# --- B. 晨掃輪值表讀取 (含診斷功能) ---
 def get_daily_duty(target_date, csv_path=DUTY_FILE):
     duty_list = []
     status = "init"
+    # 用於診斷的額外資訊
+    diagnostic_info = {
+        "all_dates_found": [],
+        "total_rows": 0,
+        "matched_rows": 0
+    }
     
     if os.path.exists(csv_path):
         encodings = ['utf-8', 'big5', 'cp950', 'utf-8-sig']
@@ -106,6 +112,8 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
                 continue
         
         if df is not None:
+            diagnostic_info["total_rows"] = len(df)
+            
             date_col = next((c for c in df.columns if "日期" in c or "時間" in c), None)
             id_col = next((c for c in df.columns if "學號" in c), None)
             name_col = next((c for c in df.columns if "姓名" in c), None)
@@ -113,12 +121,18 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
             
             if date_col and id_col:
                 try:
+                    # 嘗試標準化日期
                     df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.date
+                    # 收集所有出現過的日期 (去除空值)
+                    found_dates = df[date_col].dropna().unique()
+                    diagnostic_info["all_dates_found"] = sorted(found_dates)
                 except:
                     pass
                 
                 target_date_obj = target_date if isinstance(target_date, date) else target_date.date()
                 today_df = df[df[date_col] == target_date_obj]
+                
+                diagnostic_info["matched_rows"] = len(today_df)
                 
                 if not today_df.empty:
                     for _, row in today_df.iterrows():
@@ -130,7 +144,7 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
                             "學號": s_id,
                             "姓名": s_name,
                             "掃地區域": s_loc,
-                            "已完成打掃": False # 預設為 False (未打掃)
+                            "已完成打掃": False 
                         })
                     status = "success"
                 else:
@@ -142,7 +156,7 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
     else:
         status = "file_not_found"
         
-    return duty_list, status
+    return duty_list, status, diagnostic_info
 
 # --- C. 糾察名單 ---
 DEFAULT_HYGIENE = ["311019 衛糾01 胡林琇涵"]
@@ -283,7 +297,7 @@ if app_mode == "我是糾察隊 (評分)":
         role = st.selectbox("檢查項目", ("內掃檢查", "外掃檢查", "垃圾/回收檢查", "晨間打掃"))
         
         selected_class = None
-        edited_morning_df = None # 用於儲存晨掃表格狀態
+        edited_morning_df = None
         
         col_date, _ = st.columns(2)
         input_date = col_date.date_input("檢查日期", datetime.now())
@@ -299,18 +313,15 @@ if app_mode == "我是糾察隊 (評分)":
             st.info(f"ℹ️ 晨間打掃檢查 (日期: {input_date}) | 權限：衛生組長")
             inspector_name = "衛生組長"
             
-            # v18.0: 讀取輪值表並轉為可編輯表格
-            daily_duty_list, duty_status = get_daily_duty(input_date)
+            # v19.0: 接收診斷資訊
+            daily_duty_list, duty_status, diag_info = get_daily_duty(input_date)
             
             if duty_status == "success":
                 st.markdown(f"### 📋 今日 ({input_date}) 晨掃點名表")
                 st.info("👇 請在 **「已完成打掃」** 欄位打勾。**未打勾者** 將被視為缺席並扣分。")
                 
-                # 建立 DataFrame
                 duty_df = pd.DataFrame(daily_duty_list)
                 
-                # 顯示可編輯表格 (關鍵功能)
-                # 使用 column_config 自定義 checkbox 欄位
                 edited_morning_df = st.data_editor(
                     duty_df,
                     column_config={
@@ -320,12 +331,11 @@ if app_mode == "我是糾察隊 (評分)":
                             default=False,
                         )
                     },
-                    disabled=["學號", "姓名", "掃地區域"], # 鎖定其他欄位不讓改
+                    disabled=["學號", "姓名", "掃地區域"],
                     hide_index=True,
                     use_container_width=True
                 )
                 
-                # 計算即時數據
                 checked_count = edited_morning_df["已完成打掃"].sum()
                 total_count = len(edited_morning_df)
                 absent_count = total_count - checked_count
@@ -337,11 +347,20 @@ if app_mode == "我是糾察隊 (評分)":
 
             elif duty_status == "no_data_for_date":
                 st.warning(f"⚠️ 找不到 {input_date} 的輪值資料。")
+                # --- v19.0: 智慧提示 ---
+                st.markdown("#### 🕵️ 系統診斷建議")
+                if diag_info["all_dates_found"]:
+                    st.write("系統在檔案中只找到了這些日期：")
+                    # 顯示前5個日期
+                    st.write(diag_info["all_dates_found"][:10]) 
+                    st.info("💡 提示：請檢查 Excel 檔中的高三學生日期，是否被自動變成了明天或後天？")
+                else:
+                    st.write("檔案中似乎沒有任何有效的日期欄位。")
+                    
             else:
                 st.error("⚠️ 讀取輪值表失敗，請檢查後台設定。")
 
         else:
-            # 一般模式
             if role == "垃圾/回收檢查":
                 inspector_name = st.selectbox("檢查人員姓名", env_team)
             else:
@@ -380,7 +399,6 @@ if app_mode == "我是糾察隊 (評分)":
             st.write("")
             is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將覆蓋舊紀錄)")
 
-            # v17.0: 晨間打掃隱藏照片上傳
             uploaded_files = None
             if role != "晨間打掃":
                 uploaded_files = st.file_uploader("📸 上傳違規照片 (可多選)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
@@ -401,14 +419,11 @@ if app_mode == "我是糾察隊 (評分)":
                         saved_paths.append(full_path)
                     img_path_str = ";".join(saved_paths)
 
-                # --- 晨掃批次處理 (v18.0 表格版) ---
                 if role == "晨間打掃":
                     if edited_morning_df is None:
                         st.error("無資料可送出")
                     else:
-                        # 篩選出「未完成打掃」的人 (False)
                         absent_students = edited_morning_df[edited_morning_df["已完成打掃"] == False]
-                        
                         if absent_students.empty:
                             st.success("🎉 全員到齊！無需扣分。")
                         else:
@@ -417,7 +432,6 @@ if app_mode == "我是糾察隊 (評分)":
                                 target_id = row_data["學號"]
                                 target_name = row_data["姓名"]
                                 target_loc = row_data["掃地區域"]
-                                
                                 target_class = ROSTER_DICT.get(target_id, "待確認班級")
 
                                 final_note = f"{note} ({target_loc}) - {target_name}"
@@ -438,7 +452,6 @@ if app_mode == "我是糾察隊 (評分)":
                             st.success(f"✅ 已對 {success_count} 位未掃地學生進行扣分登記！")
 
                 else:
-                    # 一般單筆
                     final_note = note
                     if is_correction and "【修正】" not in note:
                         final_note = f"【修正】 {note}"
@@ -550,7 +563,7 @@ elif app_mode == "衛生組後台":
     if password == SYSTEM_CONFIG["admin_password"]:
         df = load_data()
         
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 成績報表", "📢 申訴管理", "🛠️ 資料管理", "⚙️ 系統設定"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 成績報表", "📢 申訴管理", "🛠️ 資料管理", "⚙️ 系統設定", "🩺 資料診斷"])
         
         # --- Tab 1: 報表區 ---
         with tab1:
@@ -733,6 +746,35 @@ elif app_mode == "衛生組後台":
                 SYSTEM_CONFIG["semester_start"] = str(new_date)
                 save_config(SYSTEM_CONFIG)
                 st.success("已更新")
+
+        # --- Tab 5: 資料診斷 (v19.0 新增) ---
+        with tab5:
+            st.header("🩺 資料診斷室")
+            st.info("這裡可以幫您檢查為什麼某些學生在晨掃名單中找不到。")
+            
+            st.write("#### 1. 晨掃輪值表診斷")
+            if os.path.exists(DUTY_FILE):
+                # 再次讀取並顯示詳細資訊
+                test_date = st.date_input("測試日期", datetime.now(), key="diag_date")
+                _, status, diag_info = get_daily_duty(test_date)
+                
+                st.write(f"**檔案狀態**: {status}")
+                st.write(f"**總資料筆數**: {diag_info.get('total_rows', 0)}")
+                
+                if diag_info.get("all_dates_found"):
+                    st.write("**檔案中包含的所有日期 (前20筆):**")
+                    st.write(diag_info["all_dates_found"][:20])
+                    
+                    st.write("---")
+                    st.write(f"**您選擇的日期**: {test_date}")
+                    st.write(f"**符合該日期的筆數**: {diag_info.get('matched_rows', 0)}")
+                    
+                    if diag_info.get('matched_rows', 0) == 0:
+                        st.error("❌ 找不到符合此日期的資料！請檢查上方列表，看看日期是否被 Excel 自動加一天了？")
+                else:
+                    st.warning("無法解析出任何日期，請檢查 CSV 欄位名稱是否包含「日期」。")
+            else:
+                st.error("找不到晨掃輪值表檔案。")
 
     else:
         st.error("密碼錯誤")
