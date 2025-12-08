@@ -308,7 +308,7 @@ elif app_mode == "衛生組後台":
         
         tab1, tab2, tab3 = st.tabs(["📊 成績報表", "🛠️ 資料管理", "⚙️ 系統設定"])
         
-        # --- Tab 1: 報表區 (v11.0 升級：矩陣報表) ---
+        # --- Tab 1: 報表區 ---
         with tab1:
             if not df.empty:
                 available_weeks = sorted(df["週次"].unique())
@@ -325,7 +325,7 @@ elif app_mode == "衛生組後台":
                         st.info("ℹ️ 本週包含假日/停課日：")
                         st.dataframe(week_holidays, hide_index=True)
 
-                    # 智慧清洗 (同 v10.0)
+                    # 智慧清洗
                     week_df_sorted = week_df.sort_values(by="登錄時間", ascending=False)
                     cleaned_rows = []
                     groups = week_df_sorted.groupby(["日期", "班級", "評分項目"])
@@ -359,40 +359,23 @@ elif app_mode == "衛生組後台":
                                                    daily_group["垃圾結算"] + daily_group["晨間打掃結算"] + 
                                                    daily_group["手機扣分"])
                         
-                        # === v11.0 報表生成核心 ===
-                        
-                        # 1. 班級名單框架
+                        # 報表生成
                         class_score_df = pd.DataFrame(all_classes, columns=["班級"])
-                        
-                        # 2. 總扣分
                         final_deductions = daily_group.groupby("班級")["當日總扣分"].sum().reset_index()
                         
-                        # 3. [新增] 製作每日扣分矩陣 (Pivot Table)
-                        # 轉置：列=班級, 欄=日期, 值=當日總扣分
                         daily_pivot = daily_group.pivot(index="班級", columns="日期", values="當日總扣分").reset_index()
-                        daily_pivot = daily_pivot.fillna(0) # 無扣分填0
+                        daily_pivot = daily_pivot.fillna(0)
                         
-                        # 4. 合併所有報表
-                        # 先合併總分
                         report = pd.merge(class_score_df, final_deductions, on="班級", how="left").fillna(0)
-                        # 再合併每日矩陣
                         report = pd.merge(report, daily_pivot, on="班級", how="left").fillna(0)
                         
-                        # 5. 計算成績
                         report["本週成績"] = 90 - report["當日總扣分"]
                         
-                        # 6. 整理欄位順序 (讓日期欄位排在中間)
-                        # 抓出所有的日期欄位 (已排序)
                         date_cols = sorted([col for col in report.columns if col not in ["班級", "當日總扣分", "本週成績"]])
-                        
-                        # 最終欄位順序：班級 -> 日期1 -> 日期2... -> 總扣分 -> 成績
                         final_cols = ["班級"] + date_cols + ["當日總扣分", "本週成績"]
                         report = report[final_cols]
-                        
-                        # 排序：成績高到低
                         report = report.sort_values(by="本週成績", ascending=False)
                         
-                        # === 下載與顯示 ===
                         import io
                         output = io.BytesIO()
                         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -411,8 +394,16 @@ elif app_mode == "衛生組後台":
                         )
                         
                         st.write("##### 🏆 班級成績總表 (含每日扣分概況)")
-                        st.dataframe(report.style.format("{:.0f}") # 全部顯示整數
-                                    .background_gradient(subset=["本週成績"], cmap="RdYlGn", vmin=60, vmax=90))
+                        
+                        # --- 修正後的顯示程式碼 ---
+                        # 找出所有是數字的欄位 (包含日期欄位、總分、成績)
+                        numeric_cols = report.select_dtypes(include=['number']).columns
+                        
+                        st.dataframe(
+                            report.style
+                            .format("{:.0f}", subset=numeric_cols) # 只將數字欄位格式化為整數
+                            .background_gradient(subset=["本週成績"], cmap="RdYlGn", vmin=60, vmax=90)
+                        )
 
         # --- Tab 2: 資料管理 ---
         with tab2:
