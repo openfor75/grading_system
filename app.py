@@ -5,6 +5,7 @@ import json
 from datetime import datetime, date, timedelta
 import shutil
 import io
+import urllib.parse # 用於處理 Email 連結編碼
 
 # --- 設定網頁標題 ---
 st.set_page_config(page_title="衛生糾察評分系統", layout="wide")
@@ -21,14 +22,9 @@ ROSTER_FILE = "全校名單.csv"
 DUTY_FILE = "晨掃輪值.csv" 
 APPEALS_FILE = "appeals.csv"
 INSPECTOR_DUTY_FILE = "糾察隊名單.csv" 
+TEACHER_FILE = "導師名單.csv" # v33.0 新增
 
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
-
-# --- Session State 初始化 (v32.0 新增: 用於控制表單重置) ---
-if 'clean_form_key' not in st.session_state:
-    st.session_state.clean_form_key = 0
-if 'trash_form_key' not in st.session_state:
-    st.session_state.trash_form_key = 0
 
 # ==========================================
 # 1. 設定檔與密碼管理
@@ -189,7 +185,6 @@ def load_inspector_csv():
                 s_name = str(row[name_col]).strip()
                 s_id = str(row[id_col]).strip() if id_col else ""
                 s_raw_role = str(row[role_col]).strip() if role_col else "未指定"
-                
                 s_classes = []
                 if class_scope_col:
                     raw_scope = str(row[class_scope_col])
@@ -207,10 +202,7 @@ def load_inspector_csv():
                     if "晨" in s_raw_role: allowed_roles.append("晨間打掃")
                     if "內掃" in s_raw_role: allowed_roles.append("內掃檢查")
                 
-                if not allowed_roles: 
-                    allowed_roles = ["內掃檢查"]
-                    s_raw_role += " (未識別)"
-
+                if not allowed_roles: allowed_roles = ["內掃檢查"]
                 label = f"{s_name}"
                 if s_id: label = f"{s_name} ({s_id})"
                 
@@ -232,7 +224,36 @@ def load_inspector_csv():
 
 INSPECTOR_LIST, INSPECTOR_DEBUG = load_inspector_csv()
 
-# --- E. 假日與週次 ---
+# --- E. 導師名單讀取 (v33.0 新增) ---
+@st.cache_data
+def load_teacher_emails():
+    teacher_dict = {} # 格式: {'商一甲': 'email@...'}
+    if os.path.exists(TEACHER_FILE):
+        encodings = ['utf-8', 'big5', 'cp950', 'utf-8-sig']
+        df = None
+        for enc in encodings:
+            try:
+                df = pd.read_csv(TEACHER_FILE, encoding=enc, dtype=str)
+                df.columns = df.columns.str.strip()
+                break
+            except:
+                continue
+        
+        if df is not None:
+            class_col = next((c for c in df.columns if "班級" in c), None)
+            email_col = next((c for c in df.columns if "Email" in c or "信箱" in c or "email" in c), None)
+            
+            if class_col and email_col:
+                for _, row in df.iterrows():
+                    cls = str(row[class_col]).strip()
+                    email = str(row[email_col]).strip()
+                    if cls and email and "@" in email:
+                        teacher_dict[cls] = email
+    return teacher_dict
+
+TEACHER_DICT = load_teacher_emails()
+
+# --- F. 假日與週次 ---
 def load_holidays():
     if os.path.exists(HOLIDAY_FILE):
         return pd.read_csv(HOLIDAY_FILE)
@@ -259,7 +280,7 @@ def get_school_week(date_obj):
     if week_num < 1: week_num = 0 
     return week_num, start_date
 
-# --- F. 班級產生 ---
+# --- G. 班級產生 ---
 dept_config = {"商經科": 3, "應英科": 1, "資處科": 1, "家政科": 2, "服裝科": 2}
 grades = ["一年級", "二年級", "三年級"]
 class_labels = ["甲", "乙", "丙"] 
@@ -272,7 +293,7 @@ for dept, count in dept_config.items():
         for i in range(count):
             all_classes.append(f"{dept_short}{g_num}{class_labels[i]}")
 
-# --- G. 主資料庫 ---
+# --- H. 主資料庫 ---
 def load_data():
     if os.path.exists(FILE_PATH):
         df = pd.read_csv(FILE_PATH)
@@ -311,7 +332,7 @@ def delete_batch(start_date, end_date):
     df_remaining.to_csv(FILE_PATH, index=False, encoding="utf-8-sig")
     return mask.sum()
 
-# --- H. 申訴資料庫 ---
+# --- I. 申訴資料庫 ---
 def load_appeals():
     if os.path.exists(APPEALS_FILE):
         df = pd.read_csv(APPEALS_FILE)
@@ -329,6 +350,26 @@ def update_appeal_status(index, status):
     df = load_appeals()
     df.at[index, "狀態"] = status
     df.to_csv(APPEALS_FILE, index=False, encoding="utf-8-sig")
+
+# --- v33.0 輔助函式: 判斷工作天 ---
+def is_within_appeal_period(record_date_str, limit_days=3):
+    # 簡易邏輯：排除六日的工作天計算
+    # 如果系統需要非常精準的國定假日，需引入 holidays 庫，這裡採用簡易算法
+    try:
+        r_date = pd.to_datetime(record_date_str).date()
+        today = datetime.now().date()
+        
+        work_days = 0
+        curr = r_date
+        while curr < today:
+            curr += timedelta(days=1)
+            # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+            if curr.weekday() < 5: 
+                work_days += 1
+        
+        return work_days <= limit_days
+    except:
+        return False # 日期格式錯誤預設過期
 
 # ==========================================
 # 介面開始
@@ -415,7 +456,6 @@ if app_mode == "我是糾察隊 (評分)":
             else: st.error("⚠️ 讀取輪值表失敗。")
 
         elif role == "垃圾/回收檢查":
-            # v32.0: 垃圾評分 - 一鍵刷新版
             st.info(f"📅 第 {week_num} 週 (垃圾/回收評分)")
             
             c_sel, c_btn = st.columns([3, 1])
@@ -425,19 +465,19 @@ if app_mode == "我是糾察隊 (評分)":
                 st.write("")
                 st.write("")
                 if st.button("🔄 重置表格", use_container_width=True):
-                    st.session_state.trash_form_key += 1
                     st.rerun()
             
             st.markdown(f"### 📋 全校違規登記表 ({trash_category})")
             st.info("請直接在違規項目打勾 (✅ = 扣分)")
             
-            # 使用動態 Key
-            trash_data = [{"班級": cls, "無簽名": False, "分類錯": False} for cls in all_classes]
+            trash_data = [
+                {"班級": cls, "無簽名": False, "分類錯": False} 
+                for cls in all_classes
+            ]
             trash_df_init = pd.DataFrame(trash_data)
             
             edited_trash_df = st.data_editor(
                 trash_df_init,
-                key=f"trash_editor_{st.session_state.trash_form_key}", # 動態Key
                 column_config={
                     "班級": st.column_config.TextColumn("班級", disabled=True),
                     "無簽名": st.column_config.CheckboxColumn("❌ 無簽名", default=False),
@@ -456,7 +496,6 @@ if app_mode == "我是糾察隊 (評分)":
                 class_options = all_classes
                 st.caption("ℹ️ 您未被指定特定班級，顯示全校列表。")
             
-            # v32.0: 內外掃一鍵刷新
             c_sel_cls, c_btn_cls = st.columns([3, 1])
             with c_sel_cls:
                 selected_class = st.selectbox("被登記班級", class_options)
@@ -464,38 +503,33 @@ if app_mode == "我是糾察隊 (評分)":
                 st.write("")
                 st.write("")
                 if st.button("🔄 重置表單", use_container_width=True):
-                    st.session_state.clean_form_key += 1
                     st.rerun()
             
             st.info(f"📅 第 {week_num} 週")
 
-        # 使用 form
-        with st.form("scoring_form", clear_on_submit=True): # v32.0: 開啟送出後自動清除
+        with st.form("scoring_form", clear_on_submit=True):
             in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
             is_perfect = False
             
-            # 使用動態 Key 給所有輸入框
-            k_suffix = st.session_state.clean_form_key
-            
             if role == "內掃檢查":
-                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True, key=f"radio_{k_suffix}")
+                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True)
                 if check_status == "❌ 發現違規":
                     st.subheader("違規事項登錄")
-                    in_score = st.number_input("🧹 內掃扣分", min_value=0, step=1, key=f"in_score_{k_suffix}")
-                    note = st.text_input("違規說明", placeholder="例：黑板未擦", key=f"note_{k_suffix}")
-                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1, key=f"phone_{k_suffix}")
+                    in_score = st.number_input("🧹 內掃扣分", min_value=0, step=1)
+                    note = st.text_input("違規說明", placeholder="例：黑板未擦")
+                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
                 else:
                     is_perfect = True
                     st.success("🎉 太棒了！請上傳照片作為嘉獎佐證。")
                     note = "【優良】環境整潔"
 
             elif role == "外掃檢查":
-                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True, key=f"radio_out_{k_suffix}")
+                check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True)
                 if check_status == "❌ 發現違規":
                     st.subheader("違規事項登錄")
-                    out_score = st.number_input("🍂 外掃扣分", min_value=0, step=1, key=f"out_score_{k_suffix}")
-                    note = st.text_input("違規說明", placeholder="例：走廊有垃圾", key=f"note_out_{k_suffix}")
-                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1, key=f"phone_out_{k_suffix}")
+                    out_score = st.number_input("🍂 外掃扣分", min_value=0, step=1)
+                    note = st.text_input("違規說明", placeholder="例：走廊有垃圾")
+                    phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
                 else:
                     is_perfect = True
                     st.success("🎉 太棒了！請上傳照片作為嘉獎佐證。")
@@ -508,13 +542,13 @@ if app_mode == "我是糾察隊 (評分)":
 
             st.write("")
             if role != "垃圾/回收檢查" and role != "晨間打掃":
-                is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將覆蓋舊紀錄)", key=f"fix_{k_suffix}")
+                is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將覆蓋舊紀錄)")
             else:
                 is_correction = False
 
             uploaded_files = None
             if role in ["內掃檢查", "外掃檢查"]:
-                uploaded_files = st.file_uploader("📸 上傳照片 (違規或優良佐證)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key=f"file_{k_suffix}")
+                uploaded_files = st.file_uploader("📸 上傳照片 (違規或優良佐證)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
             
             submitted = st.form_submit_button("送出評分", use_container_width=True)
 
@@ -590,10 +624,8 @@ if app_mode == "我是糾察隊 (評分)":
                                 save_entry(entry)
                                 saved_count += 1
                         
-                        # v32.0: 送出後強制刷新表格
-                        st.session_state.trash_form_key += 1
                         if saved_count > 0: 
-                            st.success(f"✅ 已成功登記 {saved_count} 筆違規紀錄！(表格已重置)")
+                            st.success(f"✅ 已成功登記 {saved_count} 筆違規紀錄！")
                             st.rerun()
                         else: st.info("👍 沒有任何班級違規。")
 
@@ -612,12 +644,8 @@ if app_mode == "我是糾察隊 (評分)":
                         "修正": is_correction, "晨掃未到者": ""
                     }
                     save_entry(entry)
-                    # v32.0: 表單送出後會自動清空 (因為 set clear_on_submit=True)
-                    st.success(f"✅ 登記完成！(表單已重置)")
-                    # 額外 increment key 確保萬無一失
-                    st.session_state.clean_form_key += 1 
+                    st.success(f"✅ 登記完成！")
                     st.rerun()
-
     else:
         st.info("👈 請在左側輸入通行碼以開始評分")
 
@@ -661,37 +689,43 @@ elif app_mode == "我是班上衛生股長":
                             else: st.info("無扣分")
                         st.caption(f"檢查人員：{row['檢查人員']} | 時間：{row['登錄時間']}")
                         
+                        # v33.0 申訴期限判斷
                         if not is_praise:
-                            if st.button("📣 我要申訴", key=f"appeal_btn_{record_id}"):
-                                st.session_state[f"show_appeal_{record_id}"] = True
-                            if st.session_state.get(f"show_appeal_{record_id}", False):
-                                with st.form(key=f"appeal_form_{record_id}"):
-                                    appeal_reason = st.text_area("請輸入申訴理由：")
-                                    appeal_imgs = st.file_uploader("📸 上傳佐證照片", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
-                                    if st.form_submit_button("送出申訴"):
-                                        appeal_img_str = ""
-                                        if appeal_imgs:
-                                            paths = []
-                                            ts = datetime.now().strftime("%H%M%S")
-                                            for idx, f in enumerate(appeal_imgs):
-                                                fname = f"Appeal_{record_id}_{ts}_{idx}.jpg"
-                                                fpath = os.path.join(IMG_DIR, fname)
-                                                with open(fpath, "wb") as w: w.write(f.getbuffer())
-                                                paths.append(fpath)
-                                            appeal_img_str = ";".join(paths)
-                                        appeal_entry = {
-                                            "日期": str(datetime.now().date()),
-                                            "班級": search_class,
-                                            "原始紀錄ID": record_id,
-                                            "申訴理由": appeal_reason,
-                                            "申請時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            "狀態": "待處理",
-                                            "佐證照片": appeal_img_str
-                                        }
-                                        save_appeal(appeal_entry)
-                                        st.success("申訴已送出！")
-                                        st.session_state[f"show_appeal_{record_id}"] = False
-                                        st.rerun()
+                            if is_within_appeal_period(row['日期']):
+                                if st.button("📣 我要申訴", key=f"appeal_btn_{record_id}"):
+                                    st.session_state[f"show_appeal_{record_id}"] = True
+                                
+                                if st.session_state.get(f"show_appeal_{record_id}", False):
+                                    with st.form(key=f"appeal_form_{record_id}"):
+                                        appeal_reason = st.text_area("請輸入申訴理由：")
+                                        appeal_imgs = st.file_uploader("📸 上傳佐證照片", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+                                        if st.form_submit_button("送出申訴"):
+                                            appeal_img_str = ""
+                                            if appeal_imgs:
+                                                paths = []
+                                                ts = datetime.now().strftime("%H%M%S")
+                                                for idx, f in enumerate(appeal_imgs):
+                                                    fname = f"Appeal_{record_id}_{ts}_{idx}.jpg"
+                                                    fpath = os.path.join(IMG_DIR, fname)
+                                                    with open(fpath, "wb") as w: w.write(f.getbuffer())
+                                                    paths.append(fpath)
+                                                appeal_img_str = ";".join(paths)
+                                            appeal_entry = {
+                                                "日期": str(datetime.now().date()),
+                                                "班級": search_class,
+                                                "原始紀錄ID": record_id,
+                                                "申訴理由": appeal_reason,
+                                                "申請時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                "狀態": "待處理",
+                                                "佐證照片": appeal_img_str
+                                            }
+                                            save_appeal(appeal_entry)
+                                            st.success("申訴已送出！")
+                                            st.session_state[f"show_appeal_{record_id}"] = False
+                                            st.rerun()
+                            else:
+                                st.caption("🔒 已超過申訴期限 (3工作天)")
+
                         path_str = str(row["照片路徑"])
                         if path_str and path_str != "nan":
                             paths = path_str.split(";")
@@ -714,7 +748,7 @@ elif app_mode == "衛生組後台":
     if password == SYSTEM_CONFIG["admin_password"]:
         df = load_data()
         
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 成績報表", "📢 申訴管理", "🛠️ 資料管理", "⚙️ 系統設定", "🩺 資料診斷"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 成績報表", "📧 違規通知", "📢 申訴管理", "🛠️ 資料管理", "⚙️ 系統設定", "🩺 資料診斷"])
         
         # --- Tab 1: 報表區 ---
         with tab1:
@@ -758,7 +792,6 @@ elif app_mode == "衛生組後台":
                             
                             daily_group["內掃結算"] = daily_group["內掃原始分"].apply(lambda x: min(x, 2))
                             daily_group["外掃結算"] = daily_group["外掃原始分"].apply(lambda x: min(x, 2))
-                            # v32.0: 垃圾總分上限
                             daily_group["垃圾結算"] = (daily_group["垃圾原始分"] + daily_group["垃圾內掃原始分"] + daily_group["垃圾外掃原始分"]).apply(lambda x: min(x, 2))
                             
                             daily_group["晨間打掃結算"] = daily_group["晨間打掃原始分"]
@@ -813,8 +846,56 @@ elif app_mode == "衛生組後台":
                             numeric_cols = report.select_dtypes(include=['number']).columns
                             st.dataframe(report.style.format("{:.0f}", subset=numeric_cols).background_gradient(subset=["總成績"], cmap="RdYlGn", vmin=60, vmax=90))
 
-        # --- Tab 2: 申訴管理 ---
+        # --- Tab 2: 違規通知 (v33.0 新增) ---
         with tab2:
+            st.write("### 📧 寄送違規通知給導師")
+            
+            notify_date = st.date_input("選擇通知日期", datetime.now())
+            
+            # 撈取該日違規資料
+            today_data = df[pd.to_datetime(df["日期"]).dt.date == notify_date].copy()
+            
+            if today_data.empty:
+                st.info("📅 該日期沒有任何評分紀錄。")
+            else:
+                st.write(f"共有 {len(today_data)} 筆紀錄，請點擊下方連結開啟郵件軟體。")
+                
+                # 整理顯示
+                for i, row in today_data.iterrows():
+                    cls_name = row['班級']
+                    teacher_email = TEACHER_DICT.get(cls_name)
+                    
+                    扣分 = row["內掃原始分"] + row["外掃原始分"] + row["垃圾原始分"] + \
+                           row["垃圾內掃原始分"] + row["垃圾外掃原始分"] + \
+                           row["晨間打掃原始分"] + row["手機人數"]
+                    
+                    if 扣分 > 0 and teacher_email:
+                        subject = f"【衛生組通知】{cls_name} 違規扣分通知 ({notify_date})"
+                        body = f"""
+                        導師您好：
+                        
+                        貴班於 {notify_date} 經檢查有以下違規事項，特此通知。
+                        
+                        違規項目：{row['評分項目']}
+                        違規內容：{row['備註']}
+                        扣分分數：{扣分} 分
+                        
+                        (此信件由系統自動生成)
+                        """
+                        
+                        # URL Encode
+                        subject_enc = urllib.parse.quote(subject)
+                        body_enc = urllib.parse.quote(body)
+                        mailto_link = f"mailto:{teacher_email}?subject={subject_enc}&body={body_enc}"
+                        
+                        col_t1, col_t2 = st.columns([3, 1])
+                        col_t1.text(f"{cls_name} - {row['備註']} (扣{扣分}分)")
+                        col_t2.markdown(f"[📧 通知導師]({mailto_link})", unsafe_allow_html=True)
+                    elif 扣分 > 0:
+                        st.caption(f"{cls_name} (扣{扣分}分) - ⚠️ 未設定導師 Email")
+
+        # --- Tab 3: 申訴管理 ---
+        with tab3:
             st.write("### 📢 學生申訴案件")
             appeals_df = load_appeals()
             pending_appeals = appeals_df[appeals_df["狀態"] == "待處理"].copy()
@@ -843,8 +924,8 @@ elif app_mode == "衛生組後台":
             else: st.info("無待處理案件。")
             with st.expander("查看歷史紀錄"): st.dataframe(appeals_df)
 
-        # --- Tab 3: 資料管理 ---
-        with tab3:
+        # --- Tab 4: 資料管理 ---
+        with tab4:
             st.write("### 🗑️ 批次刪除")
             c1, c2 = st.columns(2)
             d1 = c1.date_input("起始日期", datetime.now() - timedelta(days=7))
@@ -867,8 +948,8 @@ elif app_mode == "衛生組後台":
                     st.rerun()
             else: st.info("無資料")
 
-        # --- Tab 4: 系統設定區 ---
-        with tab4:
+        # --- Tab 5: 系統設定區 ---
+        with tab5:
             st.header("⚙️ 系統設定")
             st.subheader("1. 🔐 密碼管理")
             c1, c2 = st.columns(2)
@@ -883,38 +964,31 @@ elif app_mode == "衛生組後台":
             st.divider()
             st.subheader("2. 📂 檔案上傳設定")
             st.write("**A. 全校名單 (csv)**")
-            if ROSTER_DEBUG['status'] == 'success': st.success(f"✅ 已讀取 {len(ROSTER_DICT)} 筆資料")
-            else: st.error(f"❌ 讀取失敗: {ROSTER_DEBUG['status']}")
             uploaded_roster = st.file_uploader("更新全校名單", type=["csv"], key="roster_up")
             if uploaded_roster:
                 with open(ROSTER_FILE, "wb") as f: f.write(uploaded_roster.getbuffer())
                 st.success("上傳成功！")
-                st.rerun()
-            st.write("---")
+            
             st.write("**B. 糾察隊名單 (csv)**")
-            if INSPECTOR_DEBUG['status'] == 'success':
-                st.success(f"✅ 名單格式正確，共 {INSPECTOR_DEBUG['rows']} 人。")
-                with st.expander("🔍 點擊查看名單預覽"):
-                    preview_df = pd.DataFrame(INSPECTOR_LIST).drop(columns=["raw_role", "assigned_classes"], errors='ignore')
-                    st.dataframe(preview_df.head(10))
-            elif INSPECTOR_DEBUG['status'] == 'missing_name_col':
-                st.error("❌ 找不到「姓名」欄位！")
-                st.write("目前讀取到的欄位：", INSPECTOR_DEBUG['cols'])
-            else: st.warning("⚠️ 尚未上傳或讀取失敗")
             uploaded_insp = st.file_uploader("更新糾察隊名單", type=["csv"], key="insp_up")
             if uploaded_insp:
                 with open(INSPECTOR_DUTY_FILE, "wb") as f: f.write(uploaded_insp.getbuffer())
-                st.success("名單更新成功！")
-                st.rerun()
-            st.write("---")
+                st.success("上傳成功！")
+
             st.write("**C. 晨掃輪值表 (csv)**")
-            if os.path.exists(DUTY_FILE): st.success("✅ 目前已有輪值表檔案")
-            else: st.warning("⚠️ 尚未上傳輪值表")
             uploaded_duty = st.file_uploader("上傳晨掃輪值表", type=["csv"], key="duty_up")
             if uploaded_duty:
                 with open(DUTY_FILE, "wb") as f: f.write(uploaded_duty.getbuffer())
-                st.success("輪值表上傳成功！")
-                st.rerun()
+                st.success("上傳成功！")
+            
+            # v33.0 新增
+            st.write("**D. 導師名單 (csv)**")
+            st.info("欄位：班級、導師姓名、Email")
+            uploaded_teacher = st.file_uploader("上傳導師名單", type=["csv"], key="teacher_up")
+            if uploaded_teacher:
+                with open(TEACHER_FILE, "wb") as f: f.write(uploaded_teacher.getbuffer())
+                st.success("上傳成功！")
+
             st.divider()
             st.subheader("3. 學期與假日")
             current_start = datetime.strptime(SYSTEM_CONFIG["semester_start"], "%Y-%m-%d").date()
@@ -924,26 +998,15 @@ elif app_mode == "衛生組後台":
                 save_config(SYSTEM_CONFIG)
                 st.success("已更新")
 
-        # --- Tab 5: 資料診斷 ---
-        with tab5:
+        # --- Tab 6: 資料診斷 ---
+        with tab6:
             st.header("🩺 資料診斷室")
-            st.info("這裡可以幫您檢查為什麼某些學生在晨掃名單中找不到。")
-            
-            st.write("#### 1. 晨掃輪值表診斷")
             if os.path.exists(DUTY_FILE):
                 test_date = st.date_input("測試日期", datetime.now(), key="diag_date")
                 _, status, diag_info = get_daily_duty(test_date)
-                st.write(f"**檔案狀態**: {status}")
-                st.write(f"**總資料筆數**: {diag_info.get('total_rows', 0)}")
+                st.write(f"**晨掃檔案狀態**: {status}")
                 if diag_info.get("all_dates_found"):
-                    st.write("**檔案中包含的所有日期 (前20筆):**")
-                    st.write(diag_info["all_dates_found"][:20])
-                    st.write("---")
-                    st.write(f"**您選擇的日期**: {test_date}")
-                    st.write(f"**符合該日期的筆數**: {diag_info.get('matched_rows', 0)}")
-                    if diag_info.get('matched_rows', 0) == 0: st.error("❌ 找不到符合此日期的資料！")
-                else: st.warning("無法解析出任何日期")
-            else: st.error("找不到晨掃輪值表檔案")
+                    st.write("**包含日期 (前20筆):**", diag_info["all_dates_found"][:20])
 
     else:
         st.error("密碼錯誤")
