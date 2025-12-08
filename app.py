@@ -177,9 +177,6 @@ def load_inspector_csv():
         role_col = next((c for c in df.columns if "負責" in c or "項目" in c or "職位" in c), None)
         class_scope_col = next((c for c in df.columns if "班級" in c or "範圍" in c), None)
         
-        debug_info["name_col"] = name_col
-        debug_info["role_col"] = role_col
-        
         if name_col:
             debug_info["status"] = "success"
             for _, row in df.iterrows():
@@ -204,10 +201,7 @@ def load_inspector_csv():
                     if "晨" in s_raw_role: allowed_roles.append("晨間打掃")
                     if "內掃" in s_raw_role: allowed_roles.append("內掃檢查")
                 
-                if not allowed_roles: 
-                    allowed_roles = ["內掃檢查"]
-                    s_raw_role += " (未識別)"
-
+                if not allowed_roles: allowed_roles = ["內掃檢查"]
                 label = f"{s_name}"
                 if s_id: label = f"{s_name} ({s_id})"
                 
@@ -371,7 +365,7 @@ if app_mode == "我是糾察隊 (評分)":
         selected_class = None
         edited_morning_df = None
         edited_trash_df = None
-        trash_scope = None
+        trash_category = ""
         
         col_date, col_btn = st.columns([3, 1])
         with col_date:
@@ -412,23 +406,36 @@ if app_mode == "我是糾察隊 (評分)":
             else: st.error("⚠️ 讀取輪值表失敗。")
 
         elif role == "垃圾/回收檢查":
-            # v28.0 新版垃圾評分介面 (勾選版)
+            # v29.0: 垃圾評分大表格 (內/外掃合併)
             st.info(f"📅 第 {week_num} 週 (垃圾/回收評分)")
             
-            trash_scope = st.radio("請選擇評分區域：", ["內掃區域", "外掃區域"], horizontal=True)
-            st.markdown(f"### 📋 {trash_scope}違規登記表")
-            st.info("請在違規項目打勾 (✅ = 扣分)。說明：Ⓐ無簽名/桶子 Ⓑ分類錯誤 Ⓒ態度不佳")
+            # Step 1: 選種類
+            trash_category = st.selectbox("1. 請選擇違規項目", ["一般垃圾", "紙類", "網袋", "其他回收"])
             
-            trash_data = [{"班級": cls, "A": False, "B": False, "C": False} for cls in all_classes]
+            st.markdown(f"### 📋 全校 {trash_category} 違規登記表")
+            st.caption("說明：Ⓐ無簽名 Ⓑ分類錯誤 Ⓒ態度不佳")
+            
+            # 準備空表格 (欄位: 班級, 內-A, 內-B, 內-C, 外-A, 外-B, 外-C)
+            trash_data = [
+                {
+                    "班級": cls, 
+                    "內-A": False, "內-B": False, "內-C": False,
+                    "外-A": False, "外-B": False, "外-C": False
+                } 
+                for cls in all_classes
+            ]
             trash_df_init = pd.DataFrame(trash_data)
             
             edited_trash_df = st.data_editor(
                 trash_df_init,
                 column_config={
                     "班級": st.column_config.TextColumn("班級", disabled=True),
-                    "A": st.column_config.CheckboxColumn("Ⓐ 簽名/桶子", default=False),
-                    "B": st.column_config.CheckboxColumn("Ⓑ 分類錯誤", default=False),
-                    "C": st.column_config.CheckboxColumn("Ⓒ 態度不佳", default=False)
+                    "內-A": st.column_config.CheckboxColumn("內-Ⓐ無簽", default=False),
+                    "內-B": st.column_config.CheckboxColumn("內-Ⓑ分類", default=False),
+                    "內-C": st.column_config.CheckboxColumn("內-Ⓒ態度", default=False),
+                    "外-A": st.column_config.CheckboxColumn("外-Ⓐ無簽", default=False),
+                    "外-B": st.column_config.CheckboxColumn("外-Ⓑ分類", default=False),
+                    "外-C": st.column_config.CheckboxColumn("外-Ⓒ態度", default=False),
                 },
                 hide_index=True,
                 height=600,
@@ -530,31 +537,51 @@ if app_mode == "我是糾察隊 (評分)":
                             st.success(f"✅ 已登記 {count} 位未到學生！")
 
                 elif role == "垃圾/回收檢查":
-                    # v28.0 垃圾勾選處理
+                    # v29.0 垃圾大表處理邏輯
                     if edited_trash_df is None:
                         st.error("無資料")
                     else:
                         saved_count = 0
                         for _, row in edited_trash_df.iterrows():
-                            # 收集違規項目
-                            violations = []
-                            if row["A"]: violations.append("Ⓐ無簽名/桶子")
-                            if row["B"]: violations.append("Ⓑ分類錯誤")
-                            if row["C"]: violations.append("Ⓒ態度不佳")
+                            # --- 1. 處理內掃違規 ---
+                            inner_vios = []
+                            if row["內-A"]: inner_vios.append("Ⓐ無簽名")
+                            if row["內-B"]: inner_vios.append("Ⓑ分類錯誤")
+                            if row["內-C"]: inner_vios.append("Ⓒ態度不佳")
                             
-                            if violations:
-                                score = len(violations) * 1 # 1項扣1分
-                                detail_str = "、".join(violations)
-                                note_str = f"{trash_scope}-{detail_str}"
-                                
-                                g_in = score if trash_scope == "內掃區域" else 0
-                                g_out = score if trash_scope == "外掃區域" else 0
+                            if inner_vios:
+                                score = len(inner_vios) # 1個1分
+                                detail_str = ",".join(inner_vios)
+                                note_str = f"內掃-{trash_category}:{detail_str}"
                                 
                                 entry = {
                                     "日期": input_date, "週次": week_num, "班級": row["班級"],
                                     "評分項目": role, "檢查人員": inspector_name,
                                     "內掃原始分":0, "外掃原始分":0, "垃圾原始分":0, "晨間打掃原始分":0, "手機人數":0,
-                                    "垃圾內掃原始分": g_in, "垃圾外掃原始分": g_out,
+                                    "垃圾內掃原始分": score, "垃圾外掃原始分": 0,
+                                    "備註": note_str, "照片路徑": "", "違規細項": detail_str,
+                                    "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "修正": False, "晨掃未到者": ""
+                                }
+                                save_entry(entry)
+                                saved_count += 1
+                            
+                            # --- 2. 處理外掃違規 ---
+                            outer_vios = []
+                            if row["外-A"]: outer_vios.append("Ⓐ無簽名")
+                            if row["外-B"]: outer_vios.append("Ⓑ分類錯誤")
+                            if row["外-C"]: outer_vios.append("Ⓒ態度不佳")
+                            
+                            if outer_vios:
+                                score = len(outer_vios)
+                                detail_str = ",".join(outer_vios)
+                                note_str = f"外掃-{trash_category}:{detail_str}"
+                                
+                                entry = {
+                                    "日期": input_date, "週次": week_num, "班級": row["班級"],
+                                    "評分項目": role, "檢查人員": inspector_name,
+                                    "內掃原始分":0, "外掃原始分":0, "垃圾原始分":0, "晨間打掃原始分":0, "手機人數":0,
+                                    "垃圾內掃原始分": 0, "垃圾外掃原始分": score,
                                     "備註": note_str, "照片路徑": "", "違規細項": detail_str,
                                     "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                     "修正": False, "晨掃未到者": ""
