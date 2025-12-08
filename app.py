@@ -4,6 +4,7 @@ import os
 import json
 from datetime import datetime, date, timedelta
 import shutil
+import io
 
 # --- 設定網頁標題 ---
 st.set_page_config(page_title="衛生糾察評分系統", layout="wide")
@@ -17,10 +18,176 @@ IMG_DIR = "evidence_photos"
 CONFIG_FILE = "config.json"
 HOLIDAY_FILE = "holidays.csv"
 INSPECTORS_FILE = "inspectors.json" 
+ROSTER_FILE = "全校名單.csv"  # 請確認您的檔案名稱是這個
 
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 
-# --- 預設名單 ---
+# ==========================================
+# 1. 資料處理：名單載入與解析
+# ==========================================
+
+# --- A. 晨間打掃名單 (直接內建) ---
+MORNING_TEAM_RAW = """
+211035 晨掃01 黎宜臻
+211015 晨掃02 石依玄
+211022 晨掃03 林亞璇
+211037 晨掃04 簡巧玲
+211042 晨掃05 林均則
+211043 晨掃06 高捷鈞
+211065 晨掃07 陳敏宜
+211072 晨掃08 劉宥君
+211078 晨掃09 吳振誠
+211080 晨掃10 邱炘唐
+211082 晨掃11 連健仰
+211087 晨掃12 蘇晉翰
+212012 晨掃13 李卉芯
+212015 晨掃14 周亞昕
+212030 晨掃15 黃以馨
+212032 晨掃16 楊尹歆
+213006 晨掃17 沈明德
+213007 晨掃18 卓品宏
+213018 晨掃19 王筠雁
+213025 晨掃20 許馨鈺
+214003 晨掃21 黃俊斌
+214022 晨掃22 黃心彤
+214027 晨掃23 廖于榛
+214030 晨掃24 蔡育甄
+214039 晨掃25 陳聖勳
+214056 晨掃26 陳湘穎
+214061 晨掃27 黃珮綺
+214066 晨掃28 謝沅容
+215008 晨掃29 李家綺
+215009 晨掃30 林雨彤
+215029 晨掃31 劉品君
+215030 晨掃32 蔡育慈
+215046 晨掃33 李子芸
+215055 晨掃34 陳玉真
+215038 晨掃35 陳瑋泓
+215068 晨掃36 盧姿穎
+311006 晨掃37 莊家宇
+311009 晨掃38 馮煥庭
+311023 晨掃39 張逸恩
+311037 晨掃40 蕭竹恩
+311045 晨掃41 許晉愷
+311048 晨掃42 黃柏維
+311070 晨掃43 黃卉安
+311077 晨掃44 戴培育
+311082 晨掃45 林立權
+311083 晨掃46 柯竣譯
+311086 晨掃47 陳品諺
+311120 晨掃48 王墿傑
+312002 晨掃49 吳富凱
+312006 晨掃50 高旻
+312023 晨掃51 陳芷萱
+312024 晨掃52 陳姸安
+313012 晨掃53 楊子衡
+313016 晨掃54 王綵婕
+313023 晨掃55 邱妍妍
+313024 晨掃56 邱筠娟
+314012 晨掃57 李沛澄
+314017 晨掃58 姚希璇
+314027 晨掃59 黃之妘
+314032 晨掃60 廖依淇
+314050 晨掃61 周家誼
+314061 晨掃62 陳家羽
+314067 晨掃63 黃美玉
+314077 晨掃64 簡恩語
+315002 晨掃65 許丞皓
+315003 晨掃66 詹庭碩
+315011 晨掃67 林芊邑
+315014 晨掃68 邱羽君
+315040 晨掃69 吉芸誼
+315041 晨掃70 曲苡廷
+315042 晨掃71 江玠蓉
+315048 晨掃72 洪玟汝
+411021 晨掃73 林依潔
+411023 晨掃74 林雅萱
+411029 晨掃75 許家綺
+411035 晨掃76 楊雲茜
+411064 晨掃77 楊采翎
+411045 晨掃78 彭莛浥
+411055 晨掃79 施慕榕
+411068 晨掃80 鄭宇婷
+411073 晨掃81 吳宥翔
+411079 晨掃82 黃聖鈞
+411086 晨掃83 王宥云
+411099 晨掃84 彭俐璇
+412009 晨掃85 陳靖寧
+412011 晨掃86 戴登秝
+412032 晨掃87 黃若椏
+412035 晨掃88 龍以軒
+413008 晨掃89 潘柏元
+413022 晨掃90 莊捷伊
+413026 晨掃91 曾子瑄
+413028 晨掃92 温華茜
+414005 晨掃93 王可煖
+414006 晨掃94 王苡芹
+414032 晨掃95 廖翊婷
+414039 晨掃96 魏彩芊
+414042 晨掃97 金冠政
+414050 晨掃98 林晏愉
+414065 晨掃99 曾雁婷
+414075 晨掃100 盧姵璇
+415031 晨掃101 黃恩希
+415025 晨掃102 陳峟妘
+415032 晨掃103 楊睿青
+415033 晨掃104 鄭羽軒
+415050 晨掃105 林采駽
+415052 晨掃106 徐曼綺
+415061 晨掃107 陳乙萱
+415066 晨掃108 曾逸馨
+"""
+
+def parse_morning_team(raw_text):
+    team_list = []
+    # 逐行讀取，分割出 學號、代碼、姓名
+    for line in raw_text.strip().split('\n'):
+        parts = line.split()
+        if len(parts) >= 3:
+            # 儲存為字典方便後續取用
+            team_list.append({
+                "id": parts[0],
+                "code": parts[1],
+                "name": parts[2],
+                "label": f"{parts[0]} - {parts[2]}" # 用於選單顯示
+            })
+    return team_list
+
+MORNING_TEAM_LIST = parse_morning_team(MORNING_TEAM_RAW)
+MORNING_OPTIONS = [person["label"] for person in MORNING_TEAM_LIST]
+
+# --- B. 全校名單 (讀取 CSV) ---
+@st.cache_data
+def load_roster_dict():
+    roster_dict = {}
+    if os.path.exists(ROSTER_FILE):
+        try:
+            # 嘗試讀取 CSV，確保學號讀取為字串以免開頭0被吃掉
+            df = pd.read_csv(ROSTER_FILE, dtype=str)
+            
+            # 清理欄位名稱 (移除可能的空白)
+            df.columns = df.columns.str.strip()
+            
+            # 自動尋找「學號」和「班級」欄位
+            id_col = next((c for c in df.columns if "學號" in c), None)
+            class_col = next((c for c in df.columns if "班級" in c), None)
+            
+            if id_col and class_col:
+                # 建立對照表：學號 -> 班級
+                for _, row in df.iterrows():
+                    # 確保學號是乾淨的字串
+                    s_id = str(row[id_col]).strip()
+                    s_class = str(row[class_col]).strip()
+                    roster_dict[s_id] = s_class
+            else:
+                st.error(f"⚠️ 在 `{ROSTER_FILE}` 中找不到「學號」或「班級」欄位，請檢查檔案。")
+        except Exception as e:
+            st.error(f"⚠️ 讀取全校名單失敗：{e}")
+    return roster_dict
+
+ROSTER_DICT = load_roster_dict()
+
+# --- C. 其他預設名單 ---
 DEFAULT_HYGIENE = [
     "311019 衛糾01 胡林琇涵", "311005 衛糾02 康克勤", "311076 衛糾03 戴可婕", "311119 衛糾04 羅苡宸",
     "311118 衛糾05 鍾語芯", "312021 衛糾06 許舒婷", "312012 衛糾07 江芸茜", "313017 衛糾08 何詒恩",
@@ -103,7 +270,7 @@ def get_school_week(date_obj):
     if week_num < 1: week_num = 0 
     return week_num, start_date
 
-# --- 載入名單與班級 ---
+# --- 載入名單與班級 (一般糾察用) ---
 inspectors_data = load_inspectors()
 hygiene_team = inspectors_data["hygiene"]
 env_team = inspectors_data["env"]
@@ -124,11 +291,13 @@ for dept, count in dept_config.items():
 def load_data():
     if os.path.exists(FILE_PATH):
         df = pd.read_csv(FILE_PATH)
-        # 增加「修正」欄位
-        expected_cols = ["日期", "週次", "班級", "評分項目", "檢查人員", "內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數", "備註", "照片路徑", "登錄時間", "修正"]
+        # 增加「晨掃未到者」欄位
+        expected_cols = ["日期", "週次", "班級", "評分項目", "檢查人員", "內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數", "備註", "照片路徑", "登錄時間", "修正", "晨掃未到者"]
         for col in expected_cols:
             if col == "修正":
                 if col not in df.columns: df[col] = False
+            elif col == "晨掃未到者":
+                if col not in df.columns: df[col] = ""
             elif col not in df.columns: 
                 df[col] = 0 if "分" in col or "人數" in col else ""
         return df
@@ -136,7 +305,7 @@ def load_data():
         return pd.DataFrame(columns=[
             "日期", "週次", "班級", "評分項目", "檢查人員",
             "內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數", 
-            "備註", "照片路徑", "登錄時間", "修正"
+            "備註", "照片路徑", "登錄時間", "修正", "晨掃未到者"
         ])
 
 def save_entry(new_entry):
@@ -165,18 +334,56 @@ if app_mode == "我是糾察隊 (評分)":
     
     role = st.selectbox("檢查項目", ("內掃檢查", "外掃檢查", "垃圾/回收檢查", "晨間打掃"))
     
-    if role == "垃圾/回收檢查":
-        inspector_name = st.selectbox("檢查人員姓名", env_team)
-    elif role == "晨間打掃":
+    # 初始化變數
+    selected_class = None
+    target_student_name = ""
+    target_student_id = ""
+    
+    # 根據不同項目顯示不同介面
+    if role == "晨間打掃":
         st.info("ℹ️ 晨間打掃檢查權限：衛生組長")
         inspector_name = "衛生組長"
-    else:
-        inspector_name = st.selectbox("檢查人員姓名", hygiene_team)
         
-    col1, col2 = st.columns(2)
-    input_date = col1.date_input("檢查日期", datetime.now())
-    selected_class = col2.selectbox("被登記班級", all_classes)
+        # --- 晨間打掃專用搜尋介面 ---
+        st.markdown("### 🔍 搜尋未打掃人員")
+        
+        # 搜尋學號 (下拉選單，可搜尋)
+        student_select = st.selectbox(
+            "輸入學號或姓名搜尋 (未完成打掃者)", 
+            options=MORNING_OPTIONS,
+            index=None,
+            placeholder="請輸入學號..."
+        )
+        
+        if student_select:
+            # 解析選擇的字串 "211035 - 黎宜臻"
+            target_student_id = student_select.split(" - ")[0]
+            target_student_name = student_select.split(" - ")[1]
+            
+            # 自動對應班級
+            if target_student_id in ROSTER_DICT:
+                selected_class = ROSTER_DICT[target_student_id]
+                st.success(f"✅ 已自動鎖定：**{selected_class}** (學號: {target_student_id})")
+            else:
+                st.error(f"❌ 找不到學號 {target_student_id} 的班級資料，請確認全校名單 csv 是否正確。")
+                selected_class = st.selectbox("請手動選擇班級", all_classes) # Fallback
+                
+        # 顯示日期選擇
+        col1, _ = st.columns(2)
+        input_date = col1.date_input("檢查日期", datetime.now())
+
+    else:
+        # 其他項目的正常介面
+        if role == "垃圾/回收檢查":
+            inspector_name = st.selectbox("檢查人員姓名", env_team)
+        else:
+            inspector_name = st.selectbox("檢查人員姓名", hygiene_team)
+            
+        col1, col2 = st.columns(2)
+        input_date = col1.date_input("檢查日期", datetime.now())
+        selected_class = col2.selectbox("被登記班級", all_classes)
     
+    # 計算週次
     week_num, start_date = get_school_week(input_date)
     
     holidays_df = load_holidays()
@@ -185,75 +392,87 @@ if app_mode == "我是糾察隊 (評分)":
         reason = holidays_df[holidays_df["日期"] == str(input_date)]["原因"].values[0]
         st.warning(f"⚠️ 注意：{input_date} 是假日 ({reason})，但您仍可評分。")
     
-    st.info(f"📅 日期：{input_date} (第 {week_num} 週) | 人員：{inspector_name}")
+    if selected_class:
+        st.info(f"📅 日期：{input_date} (第 {week_num} 週) | 人員：{inspector_name}")
 
-    with st.form("scoring_form"):
-        st.subheader("違規事項登錄")
-        in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
-        
-        if role == "內掃檢查":
-            in_score = st.number_input("🧹 內掃扣分 (原始)", min_value=0, step=1)
-            note = st.text_input("違規說明", placeholder="例如：黑板未擦")
-            phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
-        elif role == "外掃檢查":
-            out_score = st.number_input("🍂 外掃扣分 (原始)", min_value=0, step=1)
-            note = st.text_input("違規說明", placeholder="例如：走廊有垃圾")
-            phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
-        elif role == "垃圾/回收檢查":
-            st.markdown("每項錯誤扣 1 分")
-            c1, c2, c3, c4 = st.columns(4)
-            t1 = c1.number_input("一般垃圾", min_value=0)
-            t2 = c2.number_input("紙類", min_value=0)
-            t3 = c3.number_input("紙容器", min_value=0)
-            t4 = c4.number_input("其他", min_value=0)
-            trash_score = t1 + t2 + t3 + t4
-            if trash_score > 0:
-                note = f"一般:{t1}, 紙類:{t2}, 容器:{t3}, 其他:{t4}"
-        elif role == "晨間打掃":
-            st.markdown("🌅 **晨間打掃檢查 (無扣分上限)**")
-            morning_score = st.number_input("扣分分數", min_value=0, step=1)
-            note = st.text_input("違規說明", placeholder="例如：未進行打掃")
-
-        st.write("")
-        is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將自動覆蓋今日同項目的舊紀錄)")
-
-        uploaded_files = st.file_uploader("📸 上傳違規照片 (可多選)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
-        
-        submitted = st.form_submit_button("送出評分", use_container_width=True)
-
-        if submitted:
-            saved_paths = []
-            if uploaded_files:
-                timestamp = datetime.now().strftime("%H%M%S")
-                for i, u_file in enumerate(uploaded_files):
-                    file_ext = u_file.name.split('.')[-1]
-                    filename = f"{input_date}_{selected_class}_{timestamp}_{i+1}.{file_ext}"
-                    full_path = os.path.join(IMG_DIR, filename)
-                    with open(full_path, "wb") as f:
-                        f.write(u_file.getbuffer())
-                    saved_paths.append(full_path)
+        with st.form("scoring_form"):
+            st.subheader("違規事項登錄")
+            in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
             
-            img_path_str = ";".join(saved_paths)
+            if role == "內掃檢查":
+                in_score = st.number_input("🧹 內掃扣分 (原始)", min_value=0, step=1)
+                note = st.text_input("違規說明", placeholder="例如：黑板未擦")
+                phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
+            elif role == "外掃檢查":
+                out_score = st.number_input("🍂 外掃扣分 (原始)", min_value=0, step=1)
+                note = st.text_input("違規說明", placeholder="例如：走廊有垃圾")
+                phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
+            elif role == "垃圾/回收檢查":
+                st.markdown("每項錯誤扣 1 分")
+                c1, c2, c3, c4 = st.columns(4)
+                t1 = c1.number_input("一般垃圾", min_value=0)
+                t2 = c2.number_input("紙類", min_value=0)
+                t3 = c3.number_input("紙容器", min_value=0)
+                t4 = c4.number_input("其他", min_value=0)
+                trash_score = t1 + t2 + t3 + t4
+                if trash_score > 0:
+                    note = f"一般:{t1}, 紙類:{t2}, 容器:{t3}, 其他:{t4}"
+            elif role == "晨間打掃":
+                st.markdown(f"🌅 **晨間打掃檢查：{target_student_name} ({target_student_id})**")
+                # 強制設定
+                morning_score = st.number_input("扣分分數", min_value=0, step=1, value=1) # 預設扣1分?
+                note = "未進行打掃"
+                st.text_input("違規說明", value=note, disabled=True) # 鎖定唯讀
 
-            final_note = note
-            if is_correction and "【修正】" not in note:
-                final_note = f"【修正】 {note}"
+            st.write("")
+            is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將自動覆蓋今日同項目的舊紀錄)")
 
-            entry = {
-                "日期": input_date, "週次": week_num, "班級": selected_class,
-                "評分項目": role, "檢查人員": inspector_name,
-                "內掃原始分": in_score, "外掃原始分": out_score,
-                "垃圾原始分": trash_score, "晨間打掃原始分": morning_score,
-                "手機人數": phone_count,
-                "備註": final_note, "照片路徑": img_path_str,
-                "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "修正": is_correction
-            }
-            save_entry(entry)
-            st.success(f"✅ 登記完成！{' (已標記為修正單)' if is_correction else ''}")
+            uploaded_files = st.file_uploader("📸 上傳違規照片 (可多選)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+            
+            submitted = st.form_submit_button("送出評分", use_container_width=True)
+
+            if submitted:
+                if role == "晨間打掃" and not target_student_id:
+                    st.error("請先搜尋並選擇未打掃的學生！")
+                    st.stop()
+
+                saved_paths = []
+                if uploaded_files:
+                    timestamp = datetime.now().strftime("%H%M%S")
+                    for i, u_file in enumerate(uploaded_files):
+                        file_ext = u_file.name.split('.')[-1]
+                        filename = f"{input_date}_{selected_class}_{timestamp}_{i+1}.{file_ext}"
+                        full_path = os.path.join(IMG_DIR, filename)
+                        with open(full_path, "wb") as f:
+                            f.write(u_file.getbuffer())
+                        saved_paths.append(full_path)
+                
+                img_path_str = ";".join(saved_paths)
+
+                final_note = note
+                if is_correction and "【修正】" not in note:
+                    final_note = f"【修正】 {note}"
+                
+                # 晨掃特別備註：加入人名以便辨識
+                if role == "晨間打掃":
+                    final_note = f"{final_note} - {target_student_name}"
+
+                entry = {
+                    "日期": input_date, "週次": week_num, "班級": selected_class,
+                    "評分項目": role, "檢查人員": inspector_name,
+                    "內掃原始分": in_score, "外掃原始分": out_score,
+                    "垃圾原始分": trash_score, "晨間打掃原始分": morning_score,
+                    "手機人數": phone_count,
+                    "備註": final_note, "照片路徑": img_path_str,
+                    "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "修正": is_correction,
+                    "晨掃未到者": f"{target_student_id} {target_student_name}" if role == "晨間打掃" else ""
+                }
+                save_entry(entry)
+                st.success(f"✅ 登記完成！")
 
 # ------------------------------------------
-# 模式二：班上衛生股長
+# 模式二：班上衛生股長 (略為修改以適應晨掃顯示)
 # ------------------------------------------
 elif app_mode == "我是班上衛生股長":
     st.title("🔎 班級成績查詢")
@@ -376,34 +595,39 @@ elif app_mode == "衛生組後台":
                         report = report[final_cols]
                         report = report.sort_values(by="本週成績", ascending=False)
                         
+                        # --- 新增：晨間打掃未到專屬報表 ---
+                        morning_absent_df = cleaned_df[cleaned_df["評分項目"] == "晨間打掃"][["日期", "班級", "晨掃未到者", "晨間打掃原始分", "備註"]]
+                        morning_absent_df = morning_absent_df.sort_values(by="日期")
+
                         import io
                         output = io.BytesIO()
                         with pd.ExcelWriter(output, engine='openpyxl') as writer:
                             report.to_excel(writer, index=False, sheet_name='總成績')
+                            morning_absent_df.to_excel(writer, index=False, sheet_name='🌅晨掃未到明細') # 新增這頁
                             daily_group.to_excel(writer, index=False, sheet_name='詳細流水帳(清洗後)')
                             week_df.to_excel(writer, index=False, sheet_name='原始輸入紀錄')
                             if not week_holidays.empty:
                                 week_holidays.to_excel(writer, index=False, sheet_name='本週假日紀錄')
                         
                         st.download_button(
-                            label="📥 下載 Excel 結算報表 (含每日明細)",
+                            label="📥 下載 Excel 結算報表 (含晨掃專屬頁面)",
                             data=output.getvalue(),
                             file_name=f"第{selected_week}週_衛生糾察總表.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             use_container_width=True
                         )
                         
-                        st.write("##### 🏆 班級成績總表 (含每日扣分概況)")
-                        
-                        # --- 修正後的顯示程式碼 ---
-                        # 找出所有是數字的欄位 (包含日期欄位、總分、成績)
+                        st.write("##### 🏆 班級成績總表")
                         numeric_cols = report.select_dtypes(include=['number']).columns
-                        
                         st.dataframe(
                             report.style
-                            .format("{:.0f}", subset=numeric_cols) # 只將數字欄位格式化為整數
+                            .format("{:.0f}", subset=numeric_cols)
                             .background_gradient(subset=["本週成績"], cmap="RdYlGn", vmin=60, vmax=90)
                         )
+                        
+                        if not morning_absent_df.empty:
+                            st.write("##### 🌅 本週晨掃未到名單")
+                            st.dataframe(morning_absent_df)
 
         # --- Tab 2: 資料管理 ---
         with tab2:
