@@ -265,7 +265,7 @@ def get_school_week(date_obj):
     if week_num < 1: week_num = 0 
     return week_num, start_date
 
-# --- G. 班級產生 ---
+# --- G. 班級產生 (v37.0: 修正應英科簡寫) ---
 dept_config = {"商經科": 3, "應英科": 1, "資處科": 1, "家政科": 2, "服裝科": 2}
 grades = ["一年級", "二年級", "三年級"]
 class_labels = ["甲", "乙", "丙"] 
@@ -274,7 +274,10 @@ for dept, count in dept_config.items():
     for grade in grades:
         g_num = grade[0]
         dept_short = dept[:1]
+        # v37.0 修正
         if dept == "商經科": dept_short = "商"
+        elif dept == "應英科": dept_short = "英" # 修正應->英
+        
         for i in range(count):
             all_classes.append(f"{dept_short}{g_num}{class_labels[i]}")
 
@@ -291,7 +294,6 @@ def load_data():
             elif col not in df.columns: 
                 df[col] = 0 if "分" in col or "人數" in col else ""
         
-        # v36.0: 強制處理備註欄位的 NaN，避免 Pivot Table 報錯
         if "備註" in df.columns:
             df["備註"] = df["備註"].fillna("").astype(str)
             
@@ -341,7 +343,7 @@ def update_appeal_status(index, status):
     df.at[index, "狀態"] = status
     df.to_csv(APPEALS_FILE, index=False, encoding="utf-8-sig")
 
-# --- v33.0 輔助函式: 判斷工作天 ---
+# --- 輔助函式 ---
 def is_within_appeal_period(record_date_str, limit_days=3):
     try:
         r_date = pd.to_datetime(record_date_str).date()
@@ -354,7 +356,6 @@ def is_within_appeal_period(record_date_str, limit_days=3):
         return work_days <= limit_days
     except: return False 
 
-# --- v35.0 郵件寄送函式 ---
 def send_batch_email(notifications, sender_email, sender_password):
     if not sender_email or not sender_password:
         return "尚未設定寄件者資訊，請至系統設定填寫。", 0
@@ -616,7 +617,6 @@ if app_mode == "我是糾察隊 (評分)":
                                 }
                                 save_entry(entry)
                                 saved_count += 1
-                        
                         st.session_state.trash_form_key += 1
                         if saved_count > 0: 
                             st.success(f"✅ 已成功登記 {saved_count} 筆違規紀錄！(表格已重置)")
@@ -652,9 +652,11 @@ elif app_mode == "我是班上衛生股長":
     if not df.empty:
         search_class = st.selectbox("請選擇您的班級", all_classes)
         class_df = df[df["班級"] == search_class].copy()
+        
         if not class_df.empty:
             class_df = class_df.sort_values(by="登錄時間", ascending=False).reset_index()
             st.subheader(f"📅 {search_class} 近期紀錄")
+            
             for i, row in class_df.iterrows():
                 record_id = row['index'] 
                 total_raw = (row["內掃原始分"] + row["外掃原始分"] + row["垃圾原始分"] + 
@@ -720,8 +722,10 @@ elif app_mode == "我是班上衛生股長":
                             cols = st.columns(3)
                             for k, p in enumerate(paths):
                                 if os.path.exists(p): cols[k%3].image(p, width=150)
-        else: st.success("🎉 目前沒有違規紀錄")
-    else: st.info("尚無資料")
+        else:
+            st.success("🎉 目前沒有違規紀錄")
+    else:
+        st.info("尚無資料")
 
 # ------------------------------------------
 # 模式三：衛生組後台
@@ -764,7 +768,8 @@ elif app_mode == "衛生組後台":
                         daily_group = cleaned_df.groupby(["日期", "班級"]).agg({
                             "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum", 
                             "垃圾內掃原始分": "sum", "垃圾外掃原始分": "sum",
-                            "晨間打掃原始分": "sum", "手機人數": "sum", 
+                            "晨間打掃原始分": "sum",
+                            "手機人數": "sum", 
                             "備註": lambda x: " | ".join([str(s) for s in x if str(s) not in ["", "nan", "None"]]),
                             "檢查人員": lambda x: ", ".join(set([str(s) for s in x if str(s) not in ["", "nan"]]))
                         }).reset_index()
@@ -772,6 +777,7 @@ elif app_mode == "衛生組後台":
                         daily_group["內掃結算"] = daily_group["內掃原始分"].apply(lambda x: min(x, 2))
                         daily_group["外掃結算"] = daily_group["外掃原始分"].apply(lambda x: min(x, 2))
                         daily_group["垃圾結算"] = (daily_group["垃圾原始分"] + daily_group["垃圾內掃原始分"] + daily_group["垃圾外掃原始分"]).apply(lambda x: min(x, 2))
+                        
                         daily_group["晨間打掃結算"] = daily_group["晨間打掃原始分"]
                         daily_group["手機扣分"] = daily_group["手機人數"] * 1
                         
@@ -802,9 +808,10 @@ elif app_mode == "衛生組後台":
                             return "\n".join(reasons)
                         
                         cleaned_df['違規簡述'] = cleaned_df.apply(make_desc, axis=1)
-                        # v36.0 這裡加上強制轉字串，防止備註是 NaN 時報錯
-                        cleaned_df["備註"] = cleaned_df["備註"].astype(str)
-                        reason_pivot = cleaned_df.pivot_table(index="班級", columns="日期", values="備註", aggfunc=lambda x: "\n".join(x)).reset_index().fillna("")
+                        detail_df = cleaned_df[cleaned_df['違規簡述'] != ""]
+                        reason_pivot = pd.DataFrame()
+                        if not detail_df.empty:
+                            reason_pivot = detail_df.pivot_table(index="班級", columns="日期", values="違規簡述", aggfunc=lambda x: "\n".join(x)).reset_index().fillna("")
 
                         morning_absent_df = cleaned_df[cleaned_df["評分項目"] == "晨間打掃"][["日期", "班級", "晨掃未到者", "晨間打掃原始分", "備註"]].sort_values(by="日期")
 
@@ -851,9 +858,15 @@ elif app_mode == "衛生組後台":
                     for _, row in violations.iterrows():
                         cls_name = row['班級']
                         teacher_email = TEACHER_DICT.get(cls_name)
+                        
+                        # v37.0 修改: 檢查手機違規人數
+                        violation_content = row['備註']
+                        if row['手機人數'] > 0:
+                            violation_content += f"\n(另包含手機違規: {int(row['手機人數'])} 人)"
+                        
                         if teacher_email:
                             subject = f"【衛生組通知】{cls_name} 違規扣分通知 ({notify_date})"
-                            body = f"""導師您好：\n\n貴班於 {notify_date} 經檢查有以下違規事項，特此通知。\n\n違規內容：{row['備註']}\n扣分分數：{row['總扣分']} 分\n\n(此信件由系統自動生成)"""
+                            body = f"""導師您好：\n\n貴班於 {notify_date} 經檢查有以下違規事項，特此通知。\n\n違規內容：{violation_content}\n扣分分數：{row['總扣分']} 分\n\n(此信件由系統自動生成)"""
                             notifications.append({"email": teacher_email, "subject": subject, "body": body})
                     st.write(f"預計寄送 {len(notifications)} 封 Email。")
                     if st.button("🤖 啟動自動通知 (SMTP)"):
@@ -905,7 +918,7 @@ elif app_mode == "衛生組後台":
             st.write("### 🛠️ 單筆刪除")
             if not df.empty:
                 df_display = df.sort_values(by="登錄時間", ascending=False).reset_index()
-                options = {row['index']: f"[{'修正' if row['修正'] else '一般'}] {row['日期']} {row['班級']} - {row['評分項目']} | 備註: {row['備註']}" for i, row in df_display.iterrows()}
+                options = {row['index']: f"[{'修正' if row['修正'] else '一般'}] {row['日期']} {row['班級']} - {row['備註']}" for i, row in df_display.iterrows()}
                 selected_indices = st.multiselect("選擇紀錄：", options=options.keys(), format_func=lambda x: options[x])
                 if st.button("🗑️ 確認刪除"):
                     delete_entry(selected_indices)
