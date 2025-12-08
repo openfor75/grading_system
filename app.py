@@ -19,7 +19,7 @@ CONFIG_FILE = "config.json"
 HOLIDAY_FILE = "holidays.csv"
 INSPECTORS_FILE = "inspectors.json" 
 ROSTER_FILE = "全校名單.csv" 
-DUTY_FILE = "晨掃輪值.csv" # v17.0 新增
+DUTY_FILE = "晨掃輪值.csv" 
 APPEALS_FILE = "appeals.csv"
 
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
@@ -89,8 +89,7 @@ def load_roster_dict(csv_path=ROSTER_FILE):
 
 ROSTER_DICT, ROSTER_DEBUG = load_roster_dict()
 
-# --- B. 晨掃輪值表讀取 (v17.0 新增) ---
-# 用於從 CSV 抓取「某一天是誰要掃地」
+# --- B. 晨掃輪值表讀取 ---
 def get_daily_duty(target_date, csv_path=DUTY_FILE):
     duty_list = []
     status = "init"
@@ -107,20 +106,17 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
                 continue
         
         if df is not None:
-            # 尋找關鍵欄位
             date_col = next((c for c in df.columns if "日期" in c or "時間" in c), None)
             id_col = next((c for c in df.columns if "學號" in c), None)
             name_col = next((c for c in df.columns if "姓名" in c), None)
             loc_col = next((c for c in df.columns if "地點" in c or "區域" in c), None)
             
-            if date_col and id_col: # 至少要有日期和學號
-                # 處理日期格式，嘗試統一轉為 YYYY-MM-DD
+            if date_col and id_col:
                 try:
                     df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.date
                 except:
-                    pass # 如果轉換失敗就維持字串比對
+                    pass
                 
-                # 篩選當日
                 target_date_obj = target_date if isinstance(target_date, date) else target_date.date()
                 today_df = df[df[date_col] == target_date_obj]
                 
@@ -131,10 +127,10 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
                         s_loc = str(row[loc_col]).strip() if loc_col else "未指定"
                         
                         duty_list.append({
-                            "id": s_id,
-                            "name": s_name,
-                            "location": s_loc,
-                            "label": f"{s_loc} - {s_name} ({s_id})"
+                            "學號": s_id,
+                            "姓名": s_name,
+                            "掃地區域": s_loc,
+                            "已完成打掃": False # 預設為 False (未打掃)
                         })
                     status = "success"
                 else:
@@ -235,11 +231,11 @@ def delete_entry(idx_list):
     df = df.drop(idx_list).reset_index(drop=True)
     df.to_csv(FILE_PATH, index=False, encoding="utf-8-sig")
 
-# --- G. 申訴資料庫 (v17.0 新增照片欄位) ---
+# --- G. 申訴資料庫 ---
 def load_appeals():
     if os.path.exists(APPEALS_FILE):
         df = pd.read_csv(APPEALS_FILE)
-        if "佐證照片" not in df.columns: df["佐證照片"] = "" # 兼容舊版
+        if "佐證照片" not in df.columns: df["佐證照片"] = "" 
         return df
     return pd.DataFrame(columns=["日期", "班級", "原始紀錄ID", "申訴理由", "申請時間", "狀態", "佐證照片"]) 
 
@@ -286,16 +282,13 @@ if app_mode == "我是糾察隊 (評分)":
         st.markdown("---")
         role = st.selectbox("檢查項目", ("內掃檢查", "外掃檢查", "垃圾/回收檢查", "晨間打掃"))
         
-        # 變數初始化
         selected_class = None
-        students_selected = [] 
+        edited_morning_df = None # 用於儲存晨掃表格狀態
         
-        # 顯示日期 (所有模式共用)
         col_date, _ = st.columns(2)
         input_date = col_date.date_input("檢查日期", datetime.now())
         week_num, start_date = get_school_week(input_date)
         
-        # 假日提醒
         holidays_df = load_holidays()
         is_holiday = str(input_date) in holidays_df["日期"].values
         if is_holiday:
@@ -306,37 +299,46 @@ if app_mode == "我是糾察隊 (評分)":
             st.info(f"ℹ️ 晨間打掃檢查 (日期: {input_date}) | 權限：衛生組長")
             inspector_name = "衛生組長"
             
-            # v17.0 依日期讀取輪值表
+            # v18.0: 讀取輪值表並轉為可編輯表格
             daily_duty_list, duty_status = get_daily_duty(input_date)
             
             if duty_status == "success":
-                st.markdown(f"### 📋 今日 ({input_date}) 應掃人員名單")
-                st.info("👇 請勾選 **「未完成打掃 (缺席/未掃)」** 的學生，系統將自動扣分。")
+                st.markdown(f"### 📋 今日 ({input_date}) 晨掃點名表")
+                st.info("👇 請在 **「已完成打掃」** 欄位打勾。**未打勾者** 將被視為缺席並扣分。")
                 
-                # 製作選單
-                duty_options = [p["label"] for p in daily_duty_list]
+                # 建立 DataFrame
+                duty_df = pd.DataFrame(daily_duty_list)
                 
-                # 關鍵：這裡讓使用者選的是「沒掃的」
-                students_selected_labels = st.multiselect(
-                    "請勾選未打掃學生：", 
-                    options=duty_options,
-                    placeholder="點擊選擇或輸入關鍵字搜尋..."
+                # 顯示可編輯表格 (關鍵功能)
+                # 使用 column_config 自定義 checkbox 欄位
+                edited_morning_df = st.data_editor(
+                    duty_df,
+                    column_config={
+                        "已完成打掃": st.column_config.CheckboxColumn(
+                            "✅ 已完成打掃",
+                            help="有掃地請打勾，沒打勾會被扣分",
+                            default=False,
+                        )
+                    },
+                    disabled=["學號", "姓名", "掃地區域"], # 鎖定其他欄位不讓改
+                    hide_index=True,
+                    use_container_width=True
                 )
                 
-                # 把選到的 label 轉回詳細資料
-                students_selected = []
-                for label in students_selected_labels:
-                    # 從原始清單中找到對應的 dict
-                    target = next((item for item in daily_duty_list if item["label"] == label), None)
-                    if target:
-                        students_selected.append(target)
-                        
+                # 計算即時數據
+                checked_count = edited_morning_df["已完成打掃"].sum()
+                total_count = len(edited_morning_df)
+                absent_count = total_count - checked_count
+                
+                st.caption(f"📊 應到: {total_count} 人 | 實到: {checked_count} 人 | ⚠️ 缺席(將扣分): {absent_count} 人")
+                
+                if absent_count == total_count:
+                    st.warning("⚠️ 注意：目前沒有任何人被打勾，送出後將視為「全員缺席」！")
+
             elif duty_status == "no_data_for_date":
-                st.warning(f"⚠️ 找不到 {input_date} 的輪值資料。請確認 CSV 是否包含該日期。")
-            elif duty_status == "file_not_found":
-                st.error("⚠️ 找不到 `晨掃輪值.csv`，請至後台設定上傳。")
+                st.warning(f"⚠️ 找不到 {input_date} 的輪值資料。")
             else:
-                st.error(f"⚠️ 讀取輪值表失敗 (代碼: {duty_status})，請檢查 CSV 欄位。")
+                st.error("⚠️ 讀取輪值表失敗，請檢查後台設定。")
 
         else:
             # 一般模式
@@ -371,11 +373,9 @@ if app_mode == "我是糾察隊 (評分)":
                 if trash_score > 0: note = f"一般:{t1}, 紙類:{t2}, 容器:{t3}, 其他:{t4}"
                 
             elif role == "晨間打掃":
-                # 晨掃不顯示照片上傳，直接固定說明
                 st.markdown("**扣分設定：**")
                 morning_score = st.number_input("未到扣分 (每人)", min_value=0, step=1, value=1)
                 note = "晨掃未到/未打掃"
-                st.caption(f"已選擇 {len(students_selected)} 位未到學生。")
 
             st.write("")
             is_correction = st.checkbox("🚩 這是一筆修正資料 (勾選後，系統將覆蓋舊紀錄)")
@@ -388,7 +388,6 @@ if app_mode == "我是糾察隊 (評分)":
             submitted = st.form_submit_button("送出評分", use_container_width=True)
 
             if submitted:
-                # 圖片處理
                 img_path_str = ""
                 if uploaded_files:
                     saved_paths = []
@@ -402,36 +401,41 @@ if app_mode == "我是糾察隊 (評分)":
                         saved_paths.append(full_path)
                     img_path_str = ";".join(saved_paths)
 
-                # --- 晨掃批次處理 ---
+                # --- 晨掃批次處理 (v18.0 表格版) ---
                 if role == "晨間打掃":
-                    if not students_selected:
-                        st.error("請至少勾選一位未打掃的學生！")
+                    if edited_morning_df is None:
+                        st.error("無資料可送出")
                     else:
-                        success_count = 0
-                        for s_data in students_selected:
-                            target_id = s_data["id"]
-                            target_name = s_data["name"]
-                            target_loc = s_data["location"]
-                            
-                            # 自動對應班級
-                            target_class = ROSTER_DICT.get(target_id, "待確認班級")
+                        # 篩選出「未完成打掃」的人 (False)
+                        absent_students = edited_morning_df[edited_morning_df["已完成打掃"] == False]
+                        
+                        if absent_students.empty:
+                            st.success("🎉 全員到齊！無需扣分。")
+                        else:
+                            success_count = 0
+                            for _, row_data in absent_students.iterrows():
+                                target_id = row_data["學號"]
+                                target_name = row_data["姓名"]
+                                target_loc = row_data["掃地區域"]
+                                
+                                target_class = ROSTER_DICT.get(target_id, "待確認班級")
 
-                            final_note = f"{note} ({target_loc}) - {target_name}"
-                            if is_correction: final_note = f"【修正】 {final_note}"
+                                final_note = f"{note} ({target_loc}) - {target_name}"
+                                if is_correction: final_note = f"【修正】 {final_note}"
 
-                            entry = {
-                                "日期": input_date, "週次": week_num, "班級": target_class,
-                                "評分項目": role, "檢查人員": inspector_name,
-                                "內掃原始分": 0, "外掃原始分": 0, "垃圾原始分": 0, "晨間打掃原始分": morning_score,
-                                "手機人數": 0,
-                                "備註": final_note, "照片路徑": "", # 晨掃無照片
-                                "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "修正": is_correction,
-                                "晨掃未到者": f"{target_id} {target_name}"
-                            }
-                            save_entry(entry)
-                            success_count += 1
-                        st.success(f"✅ 成功登記 {success_count} 位未到學生！")
+                                entry = {
+                                    "日期": input_date, "週次": week_num, "班級": target_class,
+                                    "評分項目": role, "檢查人員": inspector_name,
+                                    "內掃原始分": 0, "外掃原始分": 0, "垃圾原始分": 0, "晨間打掃原始分": morning_score,
+                                    "手機人數": 0,
+                                    "備註": final_note, "照片路徑": "",
+                                    "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "修正": is_correction,
+                                    "晨掃未到者": f"{target_id} {target_name}"
+                                }
+                                save_entry(entry)
+                                success_count += 1
+                            st.success(f"✅ 已對 {success_count} 位未掃地學生進行扣分登記！")
 
                 else:
                     # 一般單筆
@@ -456,7 +460,7 @@ if app_mode == "我是糾察隊 (評分)":
         st.info("👈 請在左側輸入通行碼以開始評分")
 
 # ------------------------------------------
-# 模式二：班上衛生股長 (v17.0 新增申訴照片)
+# 模式二：班上衛生股長
 # ------------------------------------------
 elif app_mode == "我是班上衛生股長":
     st.title("🔎 班級成績查詢與申訴")
@@ -495,11 +499,9 @@ elif app_mode == "我是班上衛生股長":
                             if st.session_state.get(f"show_appeal_{record_id}", False):
                                 with st.form(key=f"appeal_form_{record_id}"):
                                     appeal_reason = st.text_area("請輸入申訴理由：")
-                                    # v17.0 新增：申訴照片
                                     appeal_imgs = st.file_uploader("📸 上傳佐證照片 (選填)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
                                     
                                     if st.form_submit_button("送出申訴"):
-                                        # 儲存照片
                                         appeal_img_str = ""
                                         if appeal_imgs:
                                             paths = []
@@ -603,7 +605,6 @@ elif app_mode == "衛生組後台":
                             final_cols = ["班級"] + date_cols + ["當日總扣分", "總成績"]
                             report = report[final_cols].sort_values(by="總成績", ascending=False)
                             
-                            # 違規原因
                             def make_desc(row):
                                 reasons = []
                                 if row["內掃原始分"] > 0: reasons.append(f"內掃({row['內掃原始分']})")
@@ -635,7 +636,7 @@ elif app_mode == "衛生組後台":
                             numeric_cols = report.select_dtypes(include=['number']).columns
                             st.dataframe(report.style.format("{:.0f}", subset=numeric_cols).background_gradient(subset=["總成績"], cmap="RdYlGn", vmin=60, vmax=90))
 
-        # --- Tab 2: 申訴管理 (v17.0 顯示照片) ---
+        # --- Tab 2: 申訴管理 ---
         with tab2:
             st.write("### 📢 學生申訴案件")
             appeals_df = load_appeals()
@@ -645,8 +646,6 @@ elif app_mode == "衛生組後台":
                 for i, row in pending_appeals.iterrows():
                     with st.expander(f"【申訴】{row['日期']} {row['班級']} - 理由：{row['申訴理由']}"):
                         st.write(f"申請時間：{row['申請時間']}")
-                        
-                        # 顯示申訴照片
                         if "佐證照片" in row and str(row["佐證照片"]) != "nan" and row["佐證照片"]:
                             st.write("**📸 申訴佐證照片：**")
                             appeal_paths = str(row["佐證照片"]).split(";")
@@ -689,7 +688,7 @@ elif app_mode == "衛生組後台":
             else:
                 st.info("無資料")
 
-        # --- Tab 4: 系統設定區 (v17.0 新增輪值表上傳) ---
+        # --- Tab 4: 系統設定區 ---
         with tab4:
             st.header("⚙️ 系統設定")
             
@@ -706,8 +705,6 @@ elif app_mode == "衛生組後台":
             st.divider()
 
             st.subheader("2. 📂 檔案上傳設定")
-            
-            # 全校名單
             st.write("**A. 全校名單 (csv)**")
             if ROSTER_DEBUG['status'] == 'success': st.success(f"✅ 已讀取 {len(ROSTER_DICT)} 筆資料")
             else: st.error(f"❌ 讀取失敗: {ROSTER_DEBUG['status']}")
@@ -718,13 +715,9 @@ elif app_mode == "衛生組後台":
                 st.rerun()
             
             st.write("---")
-            
-            # v17.0 晨掃輪值表
             st.write("**B. 晨掃輪值表 (csv)**")
-            st.info("欄位需包含：日期、學號、姓名、地點")
             if os.path.exists(DUTY_FILE): st.success("✅ 目前已有輪值表檔案")
             else: st.warning("⚠️ 尚未上傳輪值表")
-            
             uploaded_duty = st.file_uploader("上傳晨掃輪值表", type=["csv"], key="duty_up")
             if uploaded_duty:
                 with open(DUTY_FILE, "wb") as f: f.write(uploaded_duty.getbuffer())
