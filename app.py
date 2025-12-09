@@ -49,14 +49,13 @@ def get_gsheet_client():
         st.error(f"⚠️ Google 連線失敗: {e}")
         return None
 
-# 讀取資料 (超級容錯版 v2)
+# 讀取資料 (最終修正版：強制轉數字)
 def load_data():
     client = get_gsheet_client()
     if not client: return pd.DataFrame()
 
     try:
         sheet = client.open(GSHEET_NAME).sheet1
-        # 1. 抓取所有資料 (包含標題跟內容)
         data = sheet.get_all_values()
         
         # 定義標準欄位
@@ -66,17 +65,47 @@ def load_data():
             "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
         ]
 
-        # 情況 A: 試算表完全是空的 -> 回傳標準空表
         if not data:
             return pd.DataFrame(columns=expected_columns)
             
-        # 情況 B: 有資料，開始解析
-        # 我們直接忽略試算表原本的標題 (因為它可能壞掉了)，直接用我們程式裡的標準標題
-        # 這樣可以避免 "Duplicate header" 或 "空白標題" 的錯誤
-        
-        rows = data[1:] # 取出第一列之後的所有資料
+        rows = data[1:]
         if not rows:
              return pd.DataFrame(columns=expected_columns)
+
+        # 1. 統一資料寬度 (避免長度不一報錯)
+        n_cols = len(expected_columns)
+        cleaned_rows = []
+        for row in rows:
+            if len(row) > n_cols:
+                cleaned_rows.append(row[:n_cols])
+            elif len(row) < n_cols:
+                cleaned_rows.append(row + [""] * (n_cols - len(row)))
+            else:
+                cleaned_rows.append(row)
+        
+        df = pd.DataFrame(cleaned_rows, columns=expected_columns)
+
+        # 2. [關鍵修正] 強制將「數字欄位」轉為數字型態
+        # 這些欄位從 Google Sheet 抓下來是文字 (例如 "1")，必須轉成整數 (1) 才能運算
+        numeric_cols = ["內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數"]
+        
+        for col in numeric_cols:
+            if col in df.columns:
+                # to_numeric 會把非數字轉成 NaN，fillna(0) 把 NaN 補成 0，最後 astype(int) 轉整數
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+
+        # 3. 強制轉換布林值
+        if "修正" in df.columns:
+            df["修正"] = df["修正"].apply(lambda x: True if str(x).upper() == "TRUE" else False)
+            
+        return df
+
+    except gspread.exceptions.SpreadsheetNotFound:
+        st.error(f"❌ 找不到 Google 試算表：**{GSHEET_NAME}**。")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"⚠️ 讀取資料庫發生錯誤: {e}")
+        return pd.DataFrame()
 
         # --- 關鍵修正：強行統一資料寬度 ---
         # 如果試算表某一列特別長(有殘留資料)或特別短，我們強行把它變成跟標題一樣長
@@ -1073,4 +1102,5 @@ elif app_mode == "衛生組後台":
 
     else:
         st.error("密碼錯誤")
+
 
