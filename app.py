@@ -4,7 +4,8 @@ import os
 import json
 import shutil
 import smtplib
-import io # 用來處理 Excel 下載
+import io
+import re # 用來處理文字清洗 (移除姓名)
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
@@ -37,17 +38,72 @@ if not os.path.exists(BACKUP_DIR): os.makedirs(BACKUP_DIR)
 
 def perform_daily_backup():
     if not os.path.exists(SCORING_FILE): return "無資料檔可備份"
-    
-    # 產生帶有時間戳記的檔名 (例如: backups/scoring_data_2025-12-09_153000.csv)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     backup_filename = f"scoring_data_{timestamp}.csv"
     backup_path = os.path.join(BACKUP_DIR, backup_filename)
-    
     try:
         shutil.copy(SCORING_FILE, backup_path)
         return f"✅ 備份成功！檔案位置：{backup_path}"
     except Exception as e:
         return f"❌ 備份失敗: {e}"
+
+# 新增：還原備份功能
+def restore_backup(backup_filename):
+    backup_path = os.path.join(BACKUP_DIR, backup_filename)
+    if os.path.exists(backup_path):
+        try:
+            # 還原前先幫現在的壞檔做個備份，以防萬一
+            perform_daily_backup()
+            shutil.copy(backup_path, SCORING_FILE)
+            return True, "✅ 還原成功！"
+        except Exception as e:
+            return False, f"❌ 還原失敗: {e}"
+    return False, "❌ 找不到備份檔"
+
+# 新增：歷史資料匿名化 (移除姓名)
+def anonymize_history():
+    df = load_data()
+    if df.empty: return "無資料"
+    
+    count = 0
+    # 針對「檢查人員」欄位進行清洗
+    if "檢查人員" in df.columns:
+        def clean_name(val):
+            val = str(val)
+            # 如果格式是 "王小明 (91001)" -> 取出 "91001"
+            match = re.search(r'\((.*?)\)', val)
+            if match:
+                return match.group(1)
+            # 如果本來就是純數字，不動它
+            if val.isdigit():
+                return val
+            # 如果是其他格式，保留原樣 (避免誤刪)
+            return val
+
+        # 檢查是否有變更
+        original_col = df["檢查人員"].copy()
+        df["檢查人員"] = df["檢查人員"].apply(clean_name)
+        
+        # 計算變更數量
+        count = sum(original_col != df["檢查人員"])
+        
+    # 針對「晨掃未到者」欄位進行清洗 (格式: "91001 王小明")
+    if "晨掃未到者" in df.columns:
+        def clean_absent(val):
+            val = str(val)
+            # 取出第一個空格前的部分 (通常是學號)
+            parts = val.split()
+            if len(parts) > 0:
+                return parts[0] # 只留學號
+            return val
+        
+        df["晨掃未到者"] = df["晨掃未到者"].apply(clean_absent)
+
+    if count > 0:
+        df.to_csv(SCORING_FILE, index=False, encoding='utf-8-sig')
+        return f"✅ 已成功移除 {count} 筆歷史紀錄中的姓名！"
+    else:
+        return "⚠️ 沒有發現需要清洗的姓名格式 (可能已經是學號了)。"
 
 def load_data():
     expected_columns = [
@@ -75,7 +131,7 @@ def load_data():
 
 def save_entry(new_entry):
     try:
-        # 每天第一次自動備份邏輯 (只檢查日期)
+        # 自動備份邏輯：每天第一次修改時備份
         today_str = datetime.now().strftime("%Y-%m-%d")
         daily_backup_path = os.path.join(BACKUP_DIR, f"scoring_data_{today_str}.csv")
         if os.path.exists(SCORING_FILE) and not os.path.exists(daily_backup_path):
@@ -98,7 +154,7 @@ def delete_entry(indices_to_delete):
 
 def delete_batch(start_date, end_date):
     try:
-        perform_daily_backup() # 批次刪除前強制備份
+        perform_daily_backup()
         df = load_data()
         if df.empty: return 0
         df["日期_dt"] = pd.to_datetime(df["日期"]).dt.date
@@ -129,7 +185,7 @@ def save_config(new_config):
 SYSTEM_CONFIG = load_config()
 
 # ==========================================
-# 3. CSV 讀取 (輔助函式)
+# 3. CSV 讀取
 # ==========================================
 @st.cache_data
 def load_teacher_emails():
@@ -363,7 +419,6 @@ if app_mode == "我是糾察隊 (評分)":
         week_num, start_date = get_school_week(input_date)
         if str(input_date) in load_holidays()["日期"].values: st.warning(f"⚠️ 注意：{input_date} 是假日。")
 
-        # 讀取目前已有的資料
         df = load_data()
         today_records = df[df["日期"] == str(input_date)] if not df.empty else pd.DataFrame()
 
@@ -440,7 +495,6 @@ if app_mode == "我是糾察隊 (評分)":
                 s_grade = st.radio("步驟 1：選擇年級", grades, horizontal=True, key="sel_grade")
                 selected_class = st.radio("步驟 2：選擇班級", [c["name"] for c in structured_classes if c["grade"] == s_grade], horizontal=True, key="sel_class_all")
             
-            # 狀態顯示
             if selected_class:
                 is_done = False
                 if not today_records.empty:
@@ -450,7 +504,6 @@ if app_mode == "我是糾察隊 (評分)":
                 if is_done: st.success(f"✅ {selected_class} 今日已完成 {role} 評分！")
                 else: st.info(f"📍 準備評分：**{selected_class}** (尚未評分)")
 
-            # 表單區
             with st.form("scoring_form", clear_on_submit=True):
                 in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
                 is_perfect = False
@@ -552,7 +605,8 @@ elif app_mode == "我是班上衛生股長":
                         if str(row["照片路徑"]) not in ["nan", ""]:
                             cols = st.columns(3)
                             for k, p in enumerate(str(row["照片路徑"]).split(";")):
-                                if os.path.exists(p): cols[k%3].image(p, width=150)
+                                # 修正：圖片顯示寬度改為自適應 (use_container_width=True)
+                                if os.path.exists(p): cols[k%3].image(p, use_container_width=True)
         else: st.success("🎉 目前沒有違規紀錄")
     else: st.info("尚無資料")
 
@@ -590,7 +644,6 @@ elif app_mode == "衛生組後台":
                     
                     st.dataframe(rep.style.format("{:.0f}", subset=["總扣分", "總成績"]).background_gradient(subset=["總成績"], cmap="RdYlGn", vmin=60, vmax=90))
                     
-                    # 📥 Excel 下載功能
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                         rep.to_excel(writer, index=False, sheet_name='總成績')
@@ -636,11 +689,31 @@ elif app_mode == "衛生組後台":
         with tab4:
             st.write("### 🛠️ 資料管理")
             
-            # 手動備份按鈕
             if st.button("📦 立即手動備份"):
                 msg = perform_daily_backup()
                 st.success(msg)
 
+            # 新增：歷史資料清洗功能
+            if st.button("🧹 移除歷史紀錄中的姓名 (只留括號內的學號)"):
+                msg = anonymize_history()
+                st.success(msg)
+                st.rerun()
+
+            st.write("#### ♻️ 從備份還原")
+            # 讀取備份資料夾中的檔案列表
+            backups = [f for f in os.listdir(BACKUP_DIR) if f.endswith(".csv")]
+            backups.sort(reverse=True) # 新的檔案排前面
+            
+            if backups:
+                selected_backup = st.selectbox("選擇要還原的備份檔", backups)
+                if st.button("⚠️ 確認還原 (目前的資料會被覆蓋)"):
+                    success, msg = restore_backup(selected_backup)
+                    if success: st.success(msg); st.rerun()
+                    else: st.error(msg)
+            else:
+                st.info("尚無備份檔案")
+
+            st.write("---")
             st.write("#### 🗑️ 單筆刪除")
             if not df.empty:
                 df_display = df.sort_values(by="登錄時間", ascending=False).reset_index()
