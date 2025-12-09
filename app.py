@@ -510,7 +510,7 @@ if app_mode == "我是糾察隊 (評分)":
         if str(input_date) in load_holidays()["日期"].values: st.warning(f"⚠️ 注意：{input_date} 是假日。")
 
         df = load_data()
-      today_records = df[df["日期"] == str(input_date)]
+        today_records = df[df["日期"] == str(input_date)]
 
         # --- 介面分流 ---
         if role == "晨間打掃":
@@ -888,3 +888,4 @@ if st.sidebar.button("測試寫入 Google Sheet"):
             st.sidebar.error("❌ 無法取得 Sheet 連線物件")
     except Exception as e:
         st.sidebar.error(f"❌ 寫入失敗，錯誤訊息：\n{e}")
+
