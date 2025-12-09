@@ -726,7 +726,10 @@ elif app_mode == "衛生組後台":
         tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 成績", "📢 申訴", "📧 通知", "🛠️ 資料", "⚙️ 設定"])
         with tab1:
             if not df.empty:
-                wks = sorted(df["週次"].unique())
+                df["週次"] = pd.to_numeric(df["週次"], errors='coerce')
+                df["週次"] = df["週次"].fillna(0).astype(int)
+                valid_weeks = df[df["週次"] > 0]["週次"].unique()
+                wks = sorted(valid_weeks)
                 sw = st.multiselect("週次", wks, default=[wks[-1]])
                 if sw:
                     wdf = df[df["週次"].isin(sw)].copy()
@@ -906,3 +909,4 @@ if st.sidebar.button("測試寫入 Google Sheet"):
             st.sidebar.error("❌ 無法取得 Sheet 連線物件")
     except Exception as e:
         st.sidebar.error(f"❌ 寫入失敗，錯誤訊息：\n{e}")
+
