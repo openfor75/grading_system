@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import json
-import shutil # 用來做備份的工具
+import shutil
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -15,8 +15,8 @@ st.set_page_config(page_title="衛生糾察評分系統 (單機版)", layout="wi
 # 0. 基礎設定與檔案管理
 # ==========================================
 
-SCORING_FILE = "scoring_data.csv"   # 主要評分資料
-BACKUP_DIR = "backups"              # 備份資料夾
+SCORING_FILE = "scoring_data.csv"
+BACKUP_DIR = "backups"
 IMG_DIR = "evidence_photos"
 CONFIG_FILE = "config.json"
 HOLIDAY_FILE = "holidays.csv"
@@ -26,7 +26,6 @@ APPEALS_FILE = "appeals.csv"
 INSPECTOR_DUTY_FILE = "糾察隊名單.csv" 
 TEACHER_MAIL_FILE = "導師名單.csv"
 
-# 確保資料夾存在
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 if not os.path.exists(BACKUP_DIR): os.makedirs(BACKUP_DIR)
 
@@ -34,7 +33,6 @@ if not os.path.exists(BACKUP_DIR): os.makedirs(BACKUP_DIR)
 # 1. 資料庫與備份函式
 # ==========================================
 
-# 自動備份功能
 def perform_daily_backup():
     if not os.path.exists(SCORING_FILE): return
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -44,7 +42,6 @@ def perform_daily_backup():
         try: shutil.copy(SCORING_FILE, backup_path)
         except: pass
 
-# 讀取評分資料
 def load_data():
     expected_columns = [
         "日期", "週次", "班級", "評分項目", "檢查人員",
@@ -69,7 +66,6 @@ def load_data():
     else:
         return pd.DataFrame(columns=expected_columns)
 
-# 寫入資料
 def save_entry(new_entry):
     try:
         perform_daily_backup()
@@ -80,7 +76,6 @@ def save_entry(new_entry):
     except Exception as e:
         st.error(f"寫入資料失敗: {e}")
 
-# 刪除資料
 def delete_entry(indices_to_delete):
     try:
         perform_daily_backup()
@@ -90,7 +85,6 @@ def delete_entry(indices_to_delete):
     except Exception as e:
         st.error(f"刪除資料失敗: {e}")
 
-# 批次刪除
 def delete_batch(start_date, end_date):
     try:
         perform_daily_backup()
@@ -124,7 +118,7 @@ def save_config(new_config):
 SYSTEM_CONFIG = load_config()
 
 # ==========================================
-# 3. CSV 讀取 (修正：強制匿名與簡化)
+# 3. CSV 讀取 (輔助函式)
 # ==========================================
 @st.cache_data
 def load_teacher_emails():
@@ -168,6 +162,7 @@ def load_roster_dict(csv_path=ROSTER_FILE):
     return roster_dict, {}
 ROSTER_DICT, _ = load_roster_dict()
 
+# 修正：確保讀取地點
 def get_daily_duty(target_date, csv_path=DUTY_FILE):
     duty_list = []
     status = "init"
@@ -180,7 +175,7 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
         if df is not None:
             date_col = next((c for c in df.columns if "日期" in c or "時間" in c), None)
             id_col = next((c for c in df.columns if "學號" in c), None)
-            loc_col = next((c for c in df.columns if "地點" in c), None)
+            loc_col = next((c for c in df.columns if "地點" in c or "區域" in c), None)
             
             if date_col and id_col:
                 try: df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.date
@@ -189,7 +184,6 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
                 today_df = df[df[date_col] == target_date_obj]
                 if not today_df.empty:
                     for _, row in today_df.iterrows():
-                        # 只顯示學號，不讀取姓名
                         duty_list.append({
                             "學號": str(row[id_col]).strip(), 
                             "掃地區域": str(row[loc_col]).strip() if loc_col else "未指定", 
@@ -202,7 +196,6 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
     else: status = "file_not_found"
     return duty_list, status, {}
 
-# 修正版：完全不讀取姓名，只顯示學號
 @st.cache_data
 def load_inspector_csv():
     inspectors = []
@@ -214,7 +207,6 @@ def load_inspector_csv():
         try: df = pd.read_csv(INSPECTOR_DUTY_FILE, encoding=enc, dtype=str); df.columns = df.columns.str.strip(); break
         except: continue
     if df is not None:
-        # 只抓學號，不抓姓名
         id_col = next((c for c in df.columns if "學號" in c or "編號" in c), None)
         role_col = next((c for c in df.columns if "負責" in c or "項目" in c), None)
         class_scope_col = next((c for c in df.columns if "班級" in c or "範圍" in c), None)
@@ -239,7 +231,6 @@ def load_inspector_csv():
                     if "內掃" in s_raw_role: allowed_roles.append("內掃檢查")
                 if not allowed_roles: allowed_roles = ["內掃檢查"]
                 
-                # 強制只顯示學號
                 label = f"學號: {s_id}"
                 prefix = s_id[0] if s_id else "其"
                 inspectors.append({"label": label, "allowed_roles": allowed_roles, "assigned_classes": s_classes, "raw_role": s_raw_role, "id_prefix": prefix})
@@ -378,7 +369,18 @@ if app_mode == "我是糾察隊 (評分)":
                 if already_graded: st.warning("⚠️ 注意：今日已有晨掃評分紀錄。")
 
                 with st.form("morning_form", clear_on_submit=True):
-                    edited_morning_df = st.data_editor(pd.DataFrame(daily_duty_list), column_config={"已完成打掃": st.column_config.CheckboxColumn("✅ 已完成打掃", default=False)}, disabled=["學號", "姓名", "掃地區域"], hide_index=True, use_container_width=True)
+                    # 這裡確認有讀取並顯示「掃地區域」
+                    edited_morning_df = st.data_editor(
+                        pd.DataFrame(daily_duty_list), 
+                        column_config={
+                            "已完成打掃": st.column_config.CheckboxColumn("✅ 已完成打掃", default=False),
+                            "掃地區域": st.column_config.TextColumn("掃地區域", disabled=True),
+                            "學號": st.column_config.TextColumn("學號", disabled=True),
+                        }, 
+                        disabled=["學號", "姓名", "掃地區域"], 
+                        hide_index=True, 
+                        use_container_width=True
+                    )
                     morning_score = st.number_input("未到扣分 (每人)", min_value=0, step=1, value=1)
                     note = "晨掃未到/未打掃"
                     if st.form_submit_button("送出晨掃評分", use_container_width=True):
@@ -392,6 +394,7 @@ if app_mode == "我是糾察隊 (評分)":
                                 entry = {**base_entry, "班級": ROSTER_DICT.get(tid, "待確認"), "評分項目": role, "晨間打掃原始分": morning_score, "備註": f"{note} ({tloc})", "晨掃未到者": f"{tid}".strip()}
                                 save_entry(entry)
                             st.success(f"✅ 已登記 {len(absent_students)} 位未到學生！")
+                        st.rerun()
 
             elif duty_status == "no_data_for_date": st.warning(f"⚠️ 找不到 {input_date} 的輪值資料。")
             else: st.error(f"⚠️ 讀取輪值表失敗 ({duty_status})。")
@@ -420,6 +423,7 @@ if app_mode == "我是糾察隊 (評分)":
                             save_entry(entry); saved_count += 1
                     if saved_count > 0: st.success(f"✅ 已登記 {saved_count} 班違規！")
                     else: st.info("👍 無違規。")
+                    st.rerun()
 
         else:
             st.markdown("### 🏫 選擇班級")
@@ -440,7 +444,7 @@ if app_mode == "我是糾察隊 (評分)":
                 if is_done: st.success(f"✅ {selected_class} 今日已完成 {role} 評分！")
                 else: st.info(f"📍 準備評分：**{selected_class}** (尚未評分)")
 
-            # 表單區 (加入 clear_on_submit=True)
+            # 表單區
             with st.form("scoring_form", clear_on_submit=True):
                 in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
                 is_perfect = False
@@ -491,6 +495,7 @@ if app_mode == "我是糾察隊 (評分)":
                              "備註": final_note, "照片路徑": img_path_str}
                     save_entry(entry)
                     st.toast(f"✅ 已儲存：{selected_class} - {role}", icon="🎉")
+                    st.rerun()
 
     else: st.info("👈 請在左側輸入通行碼以開始評分")
 
@@ -609,16 +614,72 @@ elif app_mode == "衛生組後台":
             else: st.info("無資料或無名單")
 
         with tab4:
+            st.write("### 🛠️ 資料管理")
+            
+            st.write("#### 🗑️ 單筆刪除")
+            if not df.empty:
+                df_display = df.sort_values(by="登錄時間", ascending=False).reset_index()
+                options = {row['index']: f"[{'修正單' if row['修正'] else '一般'}] {row['日期']} {row['班級']} - {row['評分項目']} | 備註: {row['備註']}" for i, row in df_display.iterrows()}
+                selected_indices = st.multiselect("選擇要刪除的紀錄：", options=options.keys(), format_func=lambda x: options[x])
+                if st.button("🗑️ 確認永久刪除"):
+                    delete_entry(selected_indices)
+                    st.success("刪除成功！")
+                    st.rerun()
+            else: st.info("無資料")
+            
+            st.write("---")
+            st.write("#### 🗑️ 區間刪除")
             c1, c2 = st.columns(2)
             d1, d2 = c1.date_input("起", datetime.now()-timedelta(7)), c2.date_input("迄", datetime.now())
-            if st.button("🗑️ 刪除區間資料"): st.success(f"刪除 {delete_batch(d1, d2)} 筆"); st.rerun()
+            if st.button("🗑️ 刪除區間資料"):
+                count = delete_batch(d1, d2)
+                st.success(f"刪除 {count} 筆")
+                st.rerun()
             
         with tab5:
+            st.write("### ⚙️ 系統設定")
+            
+            st.write("#### 🔐 密碼管理")
             c1, c2 = st.columns(2)
-            n_admin = c1.text_input("新管理密碼", SYSTEM_CONFIG["admin_password"])
-            n_team = c2.text_input("新糾察密碼", SYSTEM_CONFIG["team_password"])
-            if st.button("💾 儲存"):
-                SYSTEM_CONFIG.update({"admin_password": n_admin, "team_password": n_team})
-                save_config(SYSTEM_CONFIG); st.success("已更新")
-            st.file_uploader("上傳全校名單", key="u1"); st.file_uploader("上傳導師名單", key="u2"); st.file_uploader("上傳糾察名單", key="u3"); st.file_uploader("上傳輪值表", key="u4")
+            n_admin = c1.text_input("新管理密碼", value=SYSTEM_CONFIG.get("admin_password", ""), type="password")
+            n_team = c2.text_input("新糾察密碼", value=SYSTEM_CONFIG.get("team_password", ""), type="password")
+            
+            st.write("#### 📧 郵件設定 (Gmail)")
+            c3, c4 = st.columns(2)
+            n_mail = c3.text_input("Gmail 信箱", value=SYSTEM_CONFIG.get("smtp_email", ""))
+            n_pwd = c4.text_input("應用程式密碼", value=SYSTEM_CONFIG.get("smtp_password", ""), type="password")
+            
+            if st.button("💾 儲存設定"):
+                SYSTEM_CONFIG.update({
+                    "admin_password": n_admin, 
+                    "team_password": n_team,
+                    "smtp_email": n_mail,
+                    "smtp_password": n_pwd
+                })
+                save_config(SYSTEM_CONFIG)
+                st.success("設定已更新！")
+            
+            st.divider()
+            st.write("#### 📂 檔案上傳")
+            
+            u1 = st.file_uploader("上傳全校名單", key="u1")
+            if u1: 
+                with open(ROSTER_FILE, "wb") as f: f.write(u1.getbuffer())
+                st.success("全校名單更新成功！"); st.rerun()
+                
+            u2 = st.file_uploader("上傳導師名單", key="u2")
+            if u2:
+                with open(TEACHER_MAIL_FILE, "wb") as f: f.write(u2.getbuffer())
+                st.success("導師名單更新成功！"); st.rerun()
+                
+            u3 = st.file_uploader("上傳糾察名單", key="u3")
+            if u3:
+                with open(INSPECTOR_DUTY_FILE, "wb") as f: f.write(u3.getbuffer())
+                st.success("糾察名單更新成功！"); st.rerun()
+                
+            u4 = st.file_uploader("上傳輪值表", key="u4")
+            if u4:
+                with open(DUTY_FILE, "wb") as f: f.write(u4.getbuffer())
+                st.success("輪值表更新成功！"); st.rerun()
+                
     else: st.error("密碼錯誤")
