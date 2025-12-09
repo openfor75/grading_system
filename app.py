@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="衛生糾察評分系統 (全校報表修復版)", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="衛生糾察評分系統 (晨掃修復版)", layout="wide", page_icon="🧹")
 
 # ==========================================
 # 0. 基礎設定與時區
@@ -74,8 +74,18 @@ def get_worksheet(tab_name):
         st.error(f"❌ 無法開啟試算表: {e}")
         return None
 
+# --- 新增：學號強力清潔劑 ---
+def clean_id(val):
+    """將學號統一轉為乾淨的字串，去除小數點和空白"""
+    try:
+        if pd.isna(val) or val == "": return ""
+        # 如果是 float (例如 11001.0)，先轉 int 去掉小數點
+        if isinstance(val, float): val = int(val)
+        return str(val).strip()
+    except: return str(val).strip()
+
 # ==========================================
-# 2. 資料讀取
+# 2. 資料讀取 (強化版)
 # ==========================================
 
 @st.cache_data(ttl=60)
@@ -132,6 +142,7 @@ def overwrite_all_data(df):
 
 @st.cache_data(ttl=300)
 def load_roster_dict():
+    """讀取全校名單 (加入 clean_id 強化配對)"""
     ws = get_worksheet(SHEET_TABS["roster"])
     roster_dict = {}
     if ws:
@@ -141,7 +152,8 @@ def load_roster_dict():
             class_col = next((c for c in df.columns if "班級" in c), None)
             if id_col and class_col:
                 for _, row in df.iterrows():
-                    sid = str(row[id_col]).strip()
+                    # 使用 clean_id 處理學號
+                    sid = clean_id(row[id_col])
                     if sid: roster_dict[sid] = str(row[class_col]).strip()
         except: pass
     return roster_dict
@@ -180,7 +192,7 @@ def load_inspector_list():
         scope_col = next((c for c in df.columns if "班級" in c or "範圍" in c), None)
         if id_col:
             for _, row in df.iterrows():
-                s_id = str(row[id_col]).strip()
+                s_id = clean_id(row[id_col]) # 使用 clean_id
                 s_role = str(row[role_col]).strip() if role_col else ""
                 allowed = []
                 if "組長" in s_role: allowed = ["內掃檢查", "外掃檢查", "垃圾/回收檢查", "晨間打掃"]
@@ -195,12 +207,16 @@ def load_inspector_list():
                 if scope_col and str(row[scope_col]):
                     raw = str(row[scope_col])
                     s_classes = [c.strip() for c in raw.replace("、", ";").replace(",", ";").split(";") if c.strip()]
-                inspectors.append({"label": f"學號: {s_id}", "allowed_roles": allowed, "assigned_classes": s_classes, "id_prefix": s_id[0] if s_id else "X"})
+                
+                # 確保 id_prefix 至少有一個字元
+                prefix = s_id[0] if len(s_id) > 0 else "X"
+                inspectors.append({"label": f"學號: {s_id}", "allowed_roles": allowed, "assigned_classes": s_classes, "id_prefix": prefix})
         return inspectors if inspectors else default
     except: return default
 
 @st.cache_data(ttl=60)
 def get_daily_duty(target_date):
+    """讀取晨掃輪值 (強化版)"""
     ws = get_worksheet(SHEET_TABS["duty"])
     if not ws: return [], "error"
     try:
@@ -215,7 +231,8 @@ def get_daily_duty(target_date):
             today_df = df[df[date_col] == t_date]
             res = []
             for _, row in today_df.iterrows():
-                res.append({"學號": str(row[id_col]).strip(), "掃地區域": str(row[loc_col]).strip() if loc_col else "", "已完成打掃": False})
+                # 使用 clean_id 處理學號
+                res.append({"學號": clean_id(row[id_col]), "掃地區域": str(row[loc_col]).strip() if loc_col else "", "已完成打掃": False})
             return res, "success"
         return [], "missing_cols"
     except: return [], "error"
@@ -316,7 +333,7 @@ if app_mode == "我是糾察隊 (評分)":
         prefixes = sorted(list(set([p["id_prefix"] for p in INSPECTOR_LIST])))
         prefix_labels = [f"{p}開頭" for p in prefixes]
         if not prefix_labels:
-            st.warning("找不到糾察名單，請通知老師在後台建立名單。")
+            st.warning("找不到糾察名單，請通知老師在後台建立名單 (Sheet: inspectors)。")
         else:
             selected_prefix_label = st.radio("步驟 1：選擇開頭", prefix_labels, horizontal=True)
             selected_prefix = selected_prefix_label[0]
@@ -349,6 +366,7 @@ if app_mode == "我是糾察隊 (評分)":
                             else:
                                 for _, r in absent.iterrows():
                                     tid = r["學號"]; tloc = r["掃地區域"]
+                                    # 這裡的 tid 已經被 clean_id 清洗過，應該能正確對應到 ROSTER_DICT
                                     save_entry({**base, "班級": ROSTER_DICT.get(tid, "待確認"), "評分項目": role, "晨間打掃原始分": morning_score, "備註": f"晨掃未到 ({tloc})", "晨掃未到者": tid})
                                 st.success(f"已登記 {len(absent)} 人")
                             st.rerun()
@@ -405,7 +423,7 @@ if app_mode == "我是糾察隊 (評分)":
                             save_entry({"日期": input_date, "週次": week_num, "檢查人員": inspector_name, "登錄時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), "修正": is_fix, "班級": selected_class, "評分項目": role, "內掃原始分": in_s, "外掃原始分": out_s, "手機人數": ph_c, "備註": note, "照片路徑": path_str})
                             st.toast(f"✅ 已儲存：{selected_class}"); st.rerun()
 
-# --- 模式2: 衛生股長 (UI優化版：按鈕式) ---
+# --- 模式2: 衛生股長 ---
 elif app_mode == "我是班上衛生股長":
     st.title("🔎 班級查詢")
     df = load_main_data()
@@ -436,13 +454,11 @@ elif app_mode == "衛生組後台":
     if pwd == st.secrets["system_config"]["admin_password"]:
         tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 成績報表", "📧 寄送通知", "🛠️ 資料刪除", "📅 設定", "📄 名單管理"])
         
-        # 1. 成績報表 (修復：顯示全校 + 扣分上限)
+        # 1. 成績報表
         with tab1:
             st.subheader("成績報表")
             st.caption("計算規則：內掃/外掃/垃圾 每日上限扣2分 | 手機與晨掃無上限")
             df = load_main_data()
-            
-            # --- 步驟 1: 建立全校名單 DataFrame (確保沒違規的班級也顯示) ---
             all_classes_df = pd.DataFrame(all_classes, columns=["班級"])
             
             if not df.empty:
@@ -452,13 +468,11 @@ elif app_mode == "衛生組後台":
                 if selected_weeks:
                     wdf = df[df["週次"].isin(selected_weeks)].copy()
                     
-                    # --- 步驟 2: 計算違規班級的扣分 ---
                     daily_agg = wdf.groupby(["日期", "班級"]).agg({
                         "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum",
                         "晨間打掃原始分": "sum", "手機人數": "sum"
                     }).reset_index()
 
-                    # 應用上限邏輯
                     daily_agg["內掃結算"] = daily_agg["內掃原始分"].apply(lambda x: min(x, 2))
                     daily_agg["外掃結算"] = daily_agg["外掃原始分"].apply(lambda x: min(x, 2))
                     daily_agg["垃圾結算"] = daily_agg["垃圾原始分"].apply(lambda x: min(x, 2))
@@ -469,9 +483,8 @@ elif app_mode == "衛生組後台":
                     violation_report = daily_agg.groupby("班級")["每日總扣分"].sum().reset_index()
                     violation_report.columns = ["班級", "總扣分"]
                     
-                    # --- 步驟 3: 合併全校名單 (Left Join) ---
                     final_report = pd.merge(all_classes_df, violation_report, on="班級", how="left")
-                    final_report["總扣分"] = final_report["總扣分"].fillna(0) # 沒違規的補 0
+                    final_report["總扣分"] = final_report["總扣分"].fillna(0)
                     final_report["總成績"] = 90 - final_report["總扣分"]
                     final_report = final_report.sort_values("總成績", ascending=False)
                     
@@ -485,11 +498,10 @@ elif app_mode == "衛生組後台":
                 else: st.info("請選擇週次")
             else: st.warning("無資料")
             
-        # 2. 寄送通知 (含預覽)
+        # 2. 寄送通知
         with tab2:
             st.subheader("📧 每日違規通知")
             target_date = st.date_input("選擇日期", today_tw)
-            
             if "mail_preview" not in st.session_state: st.session_state.mail_preview = None
 
             if st.button("🔍 搜尋當日違規 (並預覽收件人)"):
@@ -501,12 +513,9 @@ elif app_mode == "衛生組後台":
                 
                 if not day_df.empty:
                     stats = day_df.groupby("班級")[["內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數"]].sum().reset_index()
-                    
-                    # 應用上限 (顯示給老師看時也建議同步上限規則)
                     stats["內掃"] = stats["內掃原始分"].clip(upper=2)
                     stats["外掃"] = stats["外掃原始分"].clip(upper=2)
                     stats["垃圾"] = stats["垃圾原始分"].clip(upper=2)
-                    
                     stats["當日總扣分"] = stats["內掃"] + stats["外掃"] + stats["垃圾"] + stats["晨間打掃原始分"] + stats["手機人數"]
                     violation_classes = stats[stats["當日總扣分"] > 0]
                     
@@ -515,20 +524,15 @@ elif app_mode == "衛生組後台":
                         for _, row in violation_classes.iterrows():
                             cls_name = row["班級"]
                             score = row["當日總扣分"]
-                            t_name = "❌ 缺導師名單"
-                            t_email = "❌ 無法寄送"
-                            status = "異常"
+                            t_name = "❌ 缺導師名單"; t_email = "❌ 無法寄送"; status = "異常"
                             if cls_name in TEACHER_MAILS:
                                 t_info = TEACHER_MAILS[cls_name]
                                 t_name = t_info['name']; t_email = t_info['email']; status = "準備寄送"
                             preview_data.append({"班級": cls_name, "當日總扣分": score, "導師姓名": t_name, "收件信箱": t_email, "狀態": status})
-                        
                         st.session_state.mail_preview = pd.DataFrame(preview_data)
                         st.success(f"找到 {len(violation_classes)} 筆違規班級")
-                    else:
-                        st.session_state.mail_preview = None; st.info("今日無違規")
-                else:
-                    st.session_state.mail_preview = None; st.info("今日無資料")
+                    else: st.session_state.mail_preview = None; st.info("今日無違規")
+                else: st.session_state.mail_preview = None; st.info("今日無資料")
 
             if st.session_state.mail_preview is not None:
                 st.write("### 📨 寄送預覽清單"); st.dataframe(st.session_state.mail_preview)
