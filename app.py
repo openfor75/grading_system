@@ -782,22 +782,46 @@ elif app_mode == "衛生組後台":
                         if c2.button("❌ 駁回", key=f"no_{i}"): update_appeal_status(adf[adf['申請時間']==r['申請時間']].index[0], "已駁回"); st.rerun()
             else: st.info("無待處理案件")
             
-        with tab3:
+       with tab3:
             st.write("### 📧 寄送通知")
             ed = load_teacher_emails()
             md = st.date_input("日期", datetime.now())
-            tdf = df[pd.to_datetime(df["日期"]).dt.date == md]
+            
+            try:
+                target_date_col = pd.to_datetime(df["日期"], errors='coerce').dt.date
+                tdf = df[target_date_col == md].copy() 
+            except:
+                tdf = pd.DataFrame()
+
             if not tdf.empty and ed:
-                pl = []
+                pl = []             
+                cols_to_sum = ["內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數"]
+                
+                for col in cols_to_sum:
+                    if col in tdf.columns:
+                        tdf[col] = pd.to_numeric(tdf[col], errors='coerce').fillna(0)
+
                 for c in tdf["班級"].unique():
                     if c in ed:
-                        sc = tdf[tdf["班級"]==c][["內掃原始分","外掃原始分","垃圾原始分","晨間打掃","手機人數"]].sum().sum()
-                        if sc > 0: pl.append({"班級": c, "導師": ed[c]["name"], "Email": ed[c]["email"], "總扣分": sc})
-                st.dataframe(pd.DataFrame(pl))
-                if st.button("🚀 寄出"):
-                    for p in pl: send_email(p["Email"], f"違規通知 {md} {p['班級']}", f"導師您好，貴班今日扣分: {p['總扣分']}，請協助督導。")
-                    st.success("完成")
-            else: st.info("無資料或無名單")
+                        valid_cols = [col for col in cols_to_sum if col in tdf.columns]
+                        sc = tdf[tdf["班級"]==c][valid_cols].sum().sum()
+                        
+                        if sc > 0: 
+                            pl.append({"班級": c, "導師": ed[c]["name"], "Email": ed[c]["email"], "總扣分": int(sc)})
+                
+                if pl:
+                    st.dataframe(pd.DataFrame(pl))
+                    if st.button("🚀 寄出"):
+                        progress_text = st.empty()
+                        for i, p in enumerate(pl):
+                            progress_text.text(f"正在寄送：{p['班級']}...")
+                            send_email(p["Email"], f"衛生糾察違規通知 {md} - {p['班級']}", f"{p['導師']}老師您好，\n\n貴班今日 ({md}) 衛生評分總扣分為：{p['總扣分']} 分。\n請協助了解狀況，感謝老師。\n\n衛生組 敬上")
+                        progress_text.text("✅ 所有信件寄送完成！")
+                        st.success("寄送完成")
+                else:
+                    st.info("🎉 今日無違規紀錄 (或無對應的導師Email)")
+            else: 
+                st.info("無資料或無名單")
 
         with tab4:
             st.write("### 🛠️ 資料管理 (雲端模式)")
@@ -909,4 +933,5 @@ if st.sidebar.button("測試寫入 Google Sheet"):
             st.sidebar.error("❌ 無法取得 Sheet 連線物件")
     except Exception as e:
         st.sidebar.error(f"❌ 寫入失敗，錯誤訊息：\n{e}")
+
 
