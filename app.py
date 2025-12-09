@@ -93,7 +93,7 @@ def load_roster_dict(csv_path=ROSTER_FILE):
 
 ROSTER_DICT, ROSTER_DEBUG = load_roster_dict()
 
-# --- C. 晨掃輪值表讀取 (v28.0: 加強錯誤防護) ---
+# --- C. 晨掃輪值表讀取 ---
 def get_daily_duty(target_date, csv_path=DUTY_FILE):
     duty_list = []
     status = "init"
@@ -138,7 +138,7 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
                                 "已完成打掃": False 
                             })
                         except:
-                            continue # 跳過壞掉的列
+                            continue
                     status = "success"
                 else:
                     status = "no_data_for_date"
@@ -254,7 +254,7 @@ def get_school_week(date_obj):
     if week_num < 1: week_num = 0 
     return week_num, start_date
 
-# --- F. 班級產生 ---
+# --- F. 班級產生 (v29.0 修正：應英 -> 英) ---
 grades = ["一年級", "二年級", "三年級"]
 dept_config = {"商經科": 3, "應英科": 1, "資處科": 1, "家政科": 2, "服裝科": 2}
 class_labels = ["甲", "乙", "丙"] 
@@ -264,8 +264,10 @@ structured_classes = []
 for dept, count in dept_config.items():
     for grade in grades:
         g_num = grade[0]
-        dept_short = dept[:1]
+        dept_short = dept[:1] # 預設取第一個字
         if dept == "商經科": dept_short = "商"
+        if dept == "應英科": dept_short = "英" # v29.0 新增修正
+        
         for i in range(count):
             c_name = f"{dept_short}{g_num}{class_labels[i]}"
             all_classes.append(c_name)
@@ -572,13 +574,12 @@ if app_mode == "我是糾察隊 (評分)":
         st.info("👈 請在左側輸入通行碼以開始評分")
 
 # ------------------------------------------
-# 模式二：班上衛生股長 (v28.0: Radio 優化)
+# 模式二：班上衛生股長
 # ------------------------------------------
 elif app_mode == "我是班上衛生股長":
     st.title("🔎 班級成績查詢與申訴")
     df = load_data()
     if not df.empty:
-        # --- 兩階段選單 ---
         st.write("請選擇您的班級：")
         s_grade = st.radio("步驟 1：選擇年級", grades, horizontal=True)
         classes_in_grade = [c["name"] for c in structured_classes if c["grade"] == s_grade]
@@ -653,9 +654,6 @@ elif app_mode == "我是班上衛生股長":
         else: st.success("🎉 目前沒有違規紀錄")
     else: st.info("尚無資料")
 
-# ------------------------------------------
-# 模式三：衛生組後台
-# ------------------------------------------
 elif app_mode == "衛生組後台":
     st.title("📊 衛生組長管理後台")
     password = st.text_input("請輸入管理密碼", type="password")
