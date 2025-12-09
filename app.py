@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import smtplib
+import time  # 新增：用於延遲重試
 import io
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -11,7 +12,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="衛生糾察評分系統 (晨掃修復版)", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="衛生糾察評分系統(晨掃修復版)", layout="wide", page_icon="🧹")
 
 # ==========================================
 # 0. 基礎設定與時區
@@ -33,7 +34,8 @@ SHEET_TABS = {
 
 # 暫存圖片路徑
 IMG_DIR = "evidence_photos"
-if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
+if not os.path.exists(IMG_DIR):
+    os.makedirs(IMG_DIR)
 
 # 完整欄位定義
 EXPECTED_COLUMNS = [
@@ -43,7 +45,7 @@ EXPECTED_COLUMNS = [
 ]
 
 # ==========================================
-# 1. Google Sheets 連線與工具函式
+# 1. Google Sheets 連線與工具函式 (核心修復區)
 # ==========================================
 
 @st.cache_resource
@@ -61,20 +63,53 @@ def get_gspread_client():
         st.error(f"❌ Google連線失敗: {e}")
         return None
 
-def get_worksheet(tab_name):
+# --- 新增：快取試算表物件，避免重複開啟 ---
+@st.cache_resource(ttl=3600)
+def get_spreadsheet_object():
     client = get_gspread_client()
     if not client: return None
     try:
-        sheet = client.open_by_url(SHEET_URL)
-        try:
-            return sheet.worksheet(tab_name)
-        except gspread.WorksheetNotFound:
-            return sheet.add_worksheet(title=tab_name, rows=100, cols=20)
+        return client.open_by_url(SHEET_URL)
     except Exception as e:
-        st.error(f"❌ 無法開啟試算表: {e}")
+        st.error(f"❌ 無法開啟試算表連結: {e}")
         return None
 
-# --- 新增：學號強力清潔劑 ---
+def get_worksheet(tab_name):
+    """
+    嘗試取得分頁，如果遇到 429 錯誤 (太快)，自動等待後重試
+    """
+    max_retries = 3
+    wait_time = 2  # 基礎等待秒數
+    
+    for attempt in range(max_retries):
+        try:
+            # 改用快取的 spreadsheet 物件
+            sheet = get_spreadsheet_object()
+            if not sheet: return None
+            
+            try:
+                return sheet.worksheet(tab_name)
+            except gspread.WorksheetNotFound:
+                # 如果分頁不存在，嘗試建立它
+                return sheet.add_worksheet(title=tab_name, rows=100, cols=20)
+                
+        except Exception as e:
+            error_msg = str(e)
+            # 針對 Quota exceeded (429) 做處理
+            if "429" in error_msg or "Quota exceeded" in error_msg:
+                sleep_seconds = wait_time * (attempt + 1)
+                # 只有在後台印出等待訊息，不影響前台使用者
+                print(f"API 限流中，等待 {sleep_seconds} 秒後重試...") 
+                time.sleep(sleep_seconds)
+                continue
+            else:
+                st.error(f"❌ 無法讀取分頁 '{tab_name}': {e}")
+                return None
+    
+    st.error(f"❌ 讀取分頁 '{tab_name}' 失敗，Google API 忙碌中，請稍後再試。")
+    return None
+
+# --- 學號強力清潔劑 ---
 def clean_id(val):
     """將學號統一轉為乾淨的字串，去除小數點和空白"""
     try:
@@ -85,7 +120,7 @@ def clean_id(val):
     except: return str(val).strip()
 
 # ==========================================
-# 2. 資料讀取 (強化版)
+# 2. 資料讀取
 # ==========================================
 
 @st.cache_data(ttl=60)
@@ -118,6 +153,8 @@ def load_main_data():
 def save_entry(new_entry):
     ws = get_worksheet(SHEET_TABS["main"])
     if not ws: st.error("寫入失敗"); return
+    
+    # 檢查是否有標題列，沒有則補上
     if not ws.get_all_values(): ws.append_row(EXPECTED_COLUMNS)
 
     row = []
@@ -126,21 +163,36 @@ def save_entry(new_entry):
         if isinstance(val, bool): val = str(val).upper()
         if col == "日期": val = str(val)
         row.append(val)
-    ws.append_row(row)
-    st.cache_data.clear()
+    
+    # 加入重試機制的寫入
+    try:
+        ws.append_row(row)
+        st.cache_data.clear()
+    except Exception as e:
+        if "429" in str(e):
+            time.sleep(2)
+            ws.append_row(row)
+            st.cache_data.clear()
+        else:
+            st.error(f"寫入錯誤: {e}")
 
 def overwrite_all_data(df):
     ws = get_worksheet(SHEET_TABS["main"])
     if ws:
-        ws.clear()
-        if "修正" in df.columns: df["修正"] = df["修正"].apply(lambda x: "TRUE" if x else "FALSE")
-        df = df.fillna("")
-        ws.update([df.columns.values.tolist()] + df.values.tolist())
-        st.cache_data.clear()
-        return True
+        try:
+            ws.clear()
+            if "修正" in df.columns: df["修正"] = df["修正"].apply(lambda x: "TRUE" if x else "FALSE")
+            df = df.fillna("")
+            ws.update([df.columns.values.tolist()] + df.values.tolist())
+            st.cache_data.clear()
+            return True
+        except Exception as e:
+            st.error(f"覆寫失敗: {e}")
+            return False
     return False
 
-@st.cache_data(ttl=300)
+# 延長 TTL 到 3600 秒 (1小時)，因為全校名單不常變動
+@st.cache_data(ttl=3600)
 def load_roster_dict():
     """讀取全校名單 (加入 clean_id 強化配對)"""
     ws = get_worksheet(SHEET_TABS["roster"])
@@ -152,13 +204,13 @@ def load_roster_dict():
             class_col = next((c for c in df.columns if "班級" in c), None)
             if id_col and class_col:
                 for _, row in df.iterrows():
-                    # 使用 clean_id 處理學號
                     sid = clean_id(row[id_col])
                     if sid: roster_dict[sid] = str(row[class_col]).strip()
         except: pass
     return roster_dict
 
-@st.cache_data(ttl=300)
+# 延長 TTL 到 3600 秒 (1小時)
+@st.cache_data(ttl=3600)
 def load_teacher_emails():
     ws = get_worksheet(SHEET_TABS["teachers"])
     email_dict = {}
@@ -178,7 +230,8 @@ def load_teacher_emails():
         except: pass
     return email_dict
 
-@st.cache_data(ttl=300)
+# 延長 TTL 到 600 秒 (10分鐘)
+@st.cache_data(ttl=600)
 def load_inspector_list():
     ws = get_worksheet(SHEET_TABS["inspectors"])
     default = [{"label": "測試人員", "allowed_roles": ["內掃檢查"], "assigned_classes": [], "id_prefix": "測"}]
@@ -192,7 +245,7 @@ def load_inspector_list():
         scope_col = next((c for c in df.columns if "班級" in c or "範圍" in c), None)
         if id_col:
             for _, row in df.iterrows():
-                s_id = clean_id(row[id_col]) # 使用 clean_id
+                s_id = clean_id(row[id_col])
                 s_role = str(row[role_col]).strip() if role_col else ""
                 allowed = []
                 if "組長" in s_role: allowed = ["內掃檢查", "外掃檢查", "垃圾/回收檢查", "晨間打掃"]
@@ -208,7 +261,6 @@ def load_inspector_list():
                     raw = str(row[scope_col])
                     s_classes = [c.strip() for c in raw.replace("、", ";").replace(",", ";").split(";") if c.strip()]
                 
-                # 確保 id_prefix 至少有一個字元
                 prefix = s_id[0] if len(s_id) > 0 else "X"
                 inspectors.append({"label": f"學號: {s_id}", "allowed_roles": allowed, "assigned_classes": s_classes, "id_prefix": prefix})
         return inspectors if inspectors else default
@@ -216,7 +268,7 @@ def load_inspector_list():
 
 @st.cache_data(ttl=60)
 def get_daily_duty(target_date):
-    """讀取晨掃輪值 (強化版)"""
+    """讀取晨掃輪值"""
     ws = get_worksheet(SHEET_TABS["duty"])
     if not ws: return [], "error"
     try:
@@ -231,7 +283,6 @@ def get_daily_duty(target_date):
             today_df = df[df[date_col] == t_date]
             res = []
             for _, row in today_df.iterrows():
-                # 使用 clean_id 處理學號
                 res.append({"學號": clean_id(row[id_col]), "掃地區域": str(row[loc_col]).strip() if loc_col else "", "已完成打掃": False})
             return res, "success"
         return [], "missing_cols"
@@ -251,11 +302,13 @@ def load_settings():
 def save_setting(key, val):
     ws = get_worksheet(SHEET_TABS["settings"])
     if ws:
-        cell = ws.find(key)
-        if cell: ws.update_cell(cell.row, cell.col+1, val)
-        else: ws.append_row([key, val])
-        st.cache_data.clear()
-        return True
+        try:
+            cell = ws.find(key)
+            if cell: ws.update_cell(cell.row, cell.col+1, val)
+            else: ws.append_row([key, val])
+            st.cache_data.clear()
+            return True
+        except: return False
     return False
 
 def send_email(to_email, subject, body):
@@ -309,14 +362,14 @@ now_tw = datetime.now(TW_TZ)
 today_tw = now_tw.date()
 
 st.sidebar.title("🏫 功能選單")
-app_mode = st.sidebar.radio("請選擇模式", ["我是糾察隊 (評分)", "我是班上衛生股長", "衛生組後台"])
+app_mode = st.sidebar.radio("請選擇模式", ["我是糾察隊(評分)", "我是班上衛生股長", "衛生組後台"])
 
 if st.sidebar.checkbox("顯示系統連線狀態", value=True):
     if get_gspread_client(): st.sidebar.success("✅ Google Sheets 連線正常")
     else: st.sidebar.error("❌ 連線失敗")
 
 # --- 模式1: 糾察評分 ---
-if app_mode == "我是糾察隊 (評分)":
+if app_mode == "我是糾察隊(評分)":
     st.title("📝 衛生糾察評分系統")
     if "team_logged_in" not in st.session_state: st.session_state["team_logged_in"] = False
     
@@ -325,8 +378,8 @@ if app_mode == "我是糾察隊 (評分)":
             input_code = st.text_input("請輸入隊伍通行碼", type="password")
             if st.button("登入"):
                 if input_code == st.secrets["system_config"]["team_password"]:
-                    st.session_state["team_logged_in"] = True
-                    st.rerun()
+                   st.session_state["team_logged_in"] = True
+                   st.rerun()
                 else: st.error("通行碼錯誤")
     
     if st.session_state["team_logged_in"]:
@@ -366,7 +419,6 @@ if app_mode == "我是糾察隊 (評分)":
                             else:
                                 for _, r in absent.iterrows():
                                     tid = r["學號"]; tloc = r["掃地區域"]
-                                    # 這裡的 tid 已經被 clean_id 清洗過，應該能正確對應到 ROSTER_DICT
                                     save_entry({**base, "班級": ROSTER_DICT.get(tid, "待確認"), "評分項目": role, "晨間打掃原始分": morning_score, "備註": f"晨掃未到 ({tloc})", "晨掃未到者": tid})
                                 st.success(f"已登記 {len(absent)} 人")
                             st.rerun()
@@ -393,7 +445,7 @@ if app_mode == "我是糾察隊 (評分)":
                         st.rerun()
 
             else:
-                st.markdown("### 🏫 選擇班級")
+                st.markdown("### 🏫選擇班級")
                 if assigned_classes: selected_class = st.radio("請點選班級", assigned_classes)
                 else:
                     g = st.radio("年級", grades, horizontal=True)
@@ -435,15 +487,15 @@ elif app_mode == "我是班上衛生股長":
         st.divider()
         c_df = df[df["班級"] == cls].sort_values("登錄時間", ascending=False)
         if not c_df.empty:
-            st.subheader(f"📊 {cls} 近期紀錄")
+            st.subheader(f"📊 {cls}近期紀錄")
             for _, r in c_df.iterrows():
                 total_raw = r['內掃原始分']+r['外掃原始分']+r['垃圾原始分']
-                phone_msg = f" | 📱 手機: {r['手機人數']}" if r['手機人數'] > 0 else ""
+                phone_msg = f" | 📱手機: {r['手機人數']}" if r['手機人數'] > 0 else ""
                 with st.expander(f"{r['日期']} - {r['評分項目']} (扣分: {total_raw}){phone_msg}"):
                     st.write(f"📝 說明: {r['備註']}")
                     st.caption(f"檢查人員: {r['檢查人員']}")
                     if total_raw > 2:
-                        st.info("💡 系統提示：單項每日扣分上限為 2 分 (手機、晨掃除外)，最終成績將由後台自動計算上限。")
+                        st.info("💡系統提示：單項每日扣分上限為 2 分 (手機、晨掃除外)，最終成績將由後台自動計算上限。")
         else: st.info("無紀錄")
 
 # --- 模式3: 後台 ---
@@ -478,7 +530,7 @@ elif app_mode == "衛生組後台":
                     daily_agg["垃圾結算"] = daily_agg["垃圾原始分"].apply(lambda x: min(x, 2))
                     
                     daily_agg["每日總扣分"] = (daily_agg["內掃結算"] + daily_agg["外掃結算"] + 
-                                            daily_agg["垃圾結算"] + daily_agg["晨間打掃原始分"] + daily_agg["手機人數"])
+                                               daily_agg["垃圾結算"] + daily_agg["晨間打掃原始分"] + daily_agg["手機人數"])
 
                     violation_report = daily_agg.groupby("班級")["每日總扣分"].sum().reset_index()
                     violation_report.columns = ["班級", "總扣分"]
@@ -489,12 +541,12 @@ elif app_mode == "衛生組後台":
                     final_report = final_report.sort_values("總成績", ascending=False)
                     
                     try:
-                        st.dataframe(final_report.style.format("{:.0f}").background_gradient(cmap="RdYlGn", subset=["總成績"], vmin=60, vmax=90))
+                       st.dataframe(final_report.style.format("{:.0f}").background_gradient(cmap="RdYlGn", subset=["總成績"], vmin=60, vmax=90))
                     except:
-                        st.dataframe(final_report)
+                       st.dataframe(final_report)
                     
                     csv = final_report.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button("📥 下載統計報表 (CSV)", csv, f"report_weeks_{selected_weeks}.csv")
+                    st.download_button("📥下載統計報表(CSV)", csv, f"report_weeks_{selected_weeks}.csv")
                 else: st.info("請選擇週次")
             else: st.warning("無資料")
             
@@ -541,7 +593,7 @@ elif app_mode == "衛生組後台":
                     for idx, row in st.session_state.mail_preview.iterrows():
                         if row["狀態"] == "準備寄送":
                             subject = f"衛生評分通知 ({target_date}) - {row['班級']}"
-                            content = f"{row['導師姓名']} 老師您好：\n\n貴班今日({target_date}) 衛生評分總扣分為：{row['當日總扣分']} 分。\n(內掃/外掃/垃圾每日上限扣2分)\n請協助督導，謝謝。\n\n衛生組 敬上"
+                            content = f"{row['導師姓名']} 老師您好：\n\n貴班今日({target_date}) 衛生評分總扣分為：{row['當日總扣分']} 分。\n(內掃/外掃/垃圾每日上限扣2分)\n請協助督導，謝謝。\n\n衛生組敬上"
                             is_sent, _ = send_email(row["收件信箱"], subject, content)
                             if is_sent: success_count += 1
                         bar.progress((idx + 1) / total)
@@ -557,7 +609,7 @@ elif app_mode == "衛生組後台":
                     df_display = df.sort_values("登錄時間", ascending=False).head(50).reset_index()
                     options = {row['index']: f"{row['日期']} | {row['班級']} | {row['評分項目']} (ID:{row['index']})" for i, row in df_display.iterrows()}
                     selected_indices = st.multiselect("選擇要刪除的紀錄", options=options.keys(), format_func=lambda x: options[x])
-                    if st.button("🗑️ 確認刪除"):
+                    if st.button("🗑️確認刪除"):
                         new_df = df.drop(selected_indices)
                         if overwrite_all_data(new_df): st.success("刪除成功！"); st.rerun()
                 elif del_mode == "日期區間刪除 (批次)":
