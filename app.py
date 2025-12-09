@@ -452,13 +452,11 @@ elif app_mode == "衛生組後台":
             df = load_main_data()
             if not df.empty:
                 valid_weeks = sorted(df[df["週次"]>0]["週次"].unique())
-                # NEW: 週次選擇
                 selected_weeks = st.multiselect("選擇週次", valid_weeks, default=valid_weeks[-1:] if valid_weeks else [])
                 
                 if selected_weeks:
                     wdf = df[df["週次"].isin(selected_weeks)].copy()
                     
-                    # 統計邏輯
                     dg = wdf.groupby(["班級"]).agg({
                         "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum",
                         "晨間打掃原始分": "sum", "手機人數": "sum"
@@ -467,9 +465,15 @@ elif app_mode == "衛生組後台":
                     dg["總成績"] = 90 - dg["總扣分"]
                     dg = dg.sort_values("總成績", ascending=False)
                     
-                    st.dataframe(dg.style.format("{:.0f}").background_gradient("總成績", cmap="RdYlGn", vmin=60, vmax=90))
+                    try:
+                        st.dataframe(
+                            dg.style.format("{:.0f}")
+                            .background_gradient(cmap="RdYlGn", subset=["總成績"], vmin=60, vmax=90)
+                        )
+                    except Exception as e:
+                        st.warning("⚠️ 顏色渲染失敗，顯示原始表格")
+                        st.dataframe(dg)
                     
-                    # 下載按鈕
                     csv = dg.to_csv(index=False).encode('utf-8-sig')
                     st.download_button("📥 下載統計報表 (CSV)", csv, f"report_weeks_{selected_weeks}.csv")
                 else: st.info("請選擇週次")
@@ -576,3 +580,4 @@ elif app_mode == "衛生組後台":
                 st.success("快取已清除，下次操作將讀取最新名單")
     else:
         st.error("密碼錯誤")
+
