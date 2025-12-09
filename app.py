@@ -510,7 +510,7 @@ if app_mode == "我是糾察隊 (評分)":
         if str(input_date) in load_holidays()["日期"].values: st.warning(f"⚠️ 注意：{input_date} 是假日。")
 
         df = load_data()
-        today_records = df[df["日期"] == str(input_date)] if not df.empty else pd.DataFrame()
+      today_records = df[df["日期"] == str(input_date)]
 
         # --- 介面分流 ---
         if role == "晨間打掃":
@@ -869,4 +869,5 @@ elif app_mode == "衛生組後台":
                 with open(DUTY_FILE, "wb") as f: f.write(u4.getbuffer())
                 st.success("輪值表更新成功！"); st.rerun()
                 
+
     else: st.error("密碼錯誤")
