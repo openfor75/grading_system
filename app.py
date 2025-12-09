@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import os
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date, timedelta
@@ -259,4 +260,5 @@ if not df.empty:
     if not today_df.empty:
         st.dataframe(today_df)
     else:
+
         st.info("今日尚無紀錄")
