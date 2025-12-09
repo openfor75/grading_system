@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="衛生糾察評分系統 (最終修正版)", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="衛生糾察評分系統 (全校報表修復版)", layout="wide", page_icon="🧹")
 
 # ==========================================
 # 0. 基礎設定與時區
@@ -410,24 +410,17 @@ elif app_mode == "我是班上衛生股長":
     st.title("🔎 班級查詢")
     df = load_main_data()
     if not df.empty:
-        # 修改：將下拉選單改為 Radio Buttons (防止鍵盤跳出)
         st.write("請依照步驟選擇：")
         g = st.radio("步驟 1：選擇年級", grades, horizontal=True)
-        
-        # 篩選出該年級的班級
         class_options = [c["name"] for c in structured_classes if c["grade"] == g]
         cls = st.radio("步驟 2：選擇班級", class_options, horizontal=True)
-        
-        st.divider() # 分隔線
-        
+        st.divider()
         c_df = df[df["班級"] == cls].sort_values("登錄時間", ascending=False)
         if not c_df.empty:
             st.subheader(f"📊 {cls} 近期紀錄")
             for _, r in c_df.iterrows():
-                # 這裡只顯示原始紀錄，但可以在標題說明上限規則
                 total_raw = r['內掃原始分']+r['外掃原始分']+r['垃圾原始分']
                 phone_msg = f" | 📱 手機: {r['手機人數']}" if r['手機人數'] > 0 else ""
-                
                 with st.expander(f"{r['日期']} - {r['評分項目']} (扣分: {total_raw}){phone_msg}"):
                     st.write(f"📝 說明: {r['備註']}")
                     st.caption(f"檢查人員: {r['檢查人員']}")
@@ -443,11 +436,15 @@ elif app_mode == "衛生組後台":
     if pwd == st.secrets["system_config"]["admin_password"]:
         tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 成績報表", "📧 寄送通知", "🛠️ 資料刪除", "📅 設定", "📄 名單管理"])
         
-        # 1. 成績報表 (落實扣分上限邏輯)
+        # 1. 成績報表 (修復：顯示全校 + 扣分上限)
         with tab1:
             st.subheader("成績報表")
             st.caption("計算規則：內掃/外掃/垃圾 每日上限扣2分 | 手機與晨掃無上限")
             df = load_main_data()
+            
+            # --- 步驟 1: 建立全校名單 DataFrame (確保沒違規的班級也顯示) ---
+            all_classes_df = pd.DataFrame(all_classes, columns=["班級"])
+            
             if not df.empty:
                 valid_weeks = sorted(df[df["週次"]>0]["週次"].unique())
                 selected_weeks = st.multiselect("選擇週次", valid_weeks, default=valid_weeks[-1:] if valid_weeks else [])
@@ -455,34 +452,26 @@ elif app_mode == "衛生組後台":
                 if selected_weeks:
                     wdf = df[df["週次"].isin(selected_weeks)].copy()
                     
-                    # 先依照「日期」與「班級」加總原始分 (確保同一天多筆紀錄合併計算)
+                    # --- 步驟 2: 計算違規班級的扣分 ---
                     daily_agg = wdf.groupby(["日期", "班級"]).agg({
-                        "內掃原始分": "sum", 
-                        "外掃原始分": "sum", 
-                        "垃圾原始分": "sum",
-                        "晨間打掃原始分": "sum", 
-                        "手機人數": "sum"
+                        "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum",
+                        "晨間打掃原始分": "sum", "手機人數": "sum"
                     }).reset_index()
 
-                    # --- 關鍵修正：在此處應用扣分上限邏輯 ---
-                    # 1. 內掃：每日最多扣 2 分
+                    # 應用上限邏輯
                     daily_agg["內掃結算"] = daily_agg["內掃原始分"].apply(lambda x: min(x, 2))
-                    # 2. 外掃：每日最多扣 2 分
                     daily_agg["外掃結算"] = daily_agg["外掃原始分"].apply(lambda x: min(x, 2))
-                    # 3. 垃圾：每日最多扣 2 分
                     daily_agg["垃圾結算"] = daily_agg["垃圾原始分"].apply(lambda x: min(x, 2))
-                    # 4. 晨掃：無上限 (直接使用原始分)
-                    daily_agg["晨掃結算"] = daily_agg["晨間打掃原始分"]
-                    # 5. 手機：無上限 (直接使用原始分)
-                    daily_agg["手機結算"] = daily_agg["手機人數"]
-
-                    # 計算每日總扣分
+                    
                     daily_agg["每日總扣分"] = (daily_agg["內掃結算"] + daily_agg["外掃結算"] + 
-                                            daily_agg["垃圾結算"] + daily_agg["晨掃結算"] + daily_agg["手機結算"])
+                                            daily_agg["垃圾結算"] + daily_agg["晨間打掃原始分"] + daily_agg["手機人數"])
 
-                    # 最後依照「班級」加總所有日期的扣分
-                    final_report = daily_agg.groupby("班級")["每日總扣分"].sum().reset_index()
-                    final_report.columns = ["班級", "總扣分"]
+                    violation_report = daily_agg.groupby("班級")["每日總扣分"].sum().reset_index()
+                    violation_report.columns = ["班級", "總扣分"]
+                    
+                    # --- 步驟 3: 合併全校名單 (Left Join) ---
+                    final_report = pd.merge(all_classes_df, violation_report, on="班級", how="left")
+                    final_report["總扣分"] = final_report["總扣分"].fillna(0) # 沒違規的補 0
                     final_report["總成績"] = 90 - final_report["總扣分"]
                     final_report = final_report.sort_values("總成績", ascending=False)
                     
@@ -511,11 +500,9 @@ elif app_mode == "衛生組後台":
                 except: day_df = pd.DataFrame()
                 
                 if not day_df.empty:
-                    # 寄信時也應用相同的扣分上限邏輯嗎？通常通知單會顯示原始違規，但如果要顯示「扣分」，建議與報表一致
-                    # 這裡採用「顯示結算後扣分」邏輯，避免老師疑惑為何被扣超過2分
                     stats = day_df.groupby("班級")[["內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數"]].sum().reset_index()
                     
-                    # 應用上限
+                    # 應用上限 (顯示給老師看時也建議同步上限規則)
                     stats["內掃"] = stats["內掃原始分"].clip(upper=2)
                     stats["外掃"] = stats["外掃原始分"].clip(upper=2)
                     stats["垃圾"] = stats["垃圾原始分"].clip(upper=2)
