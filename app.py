@@ -49,40 +49,51 @@ def get_gsheet_client():
         st.error(f"⚠️ Google 連線失敗: {e}")
         return None
 
-# 讀取資料 (這裡做了大修改：防禦標題錯誤)
+# 讀取資料 (超級容錯版 v2)
 def load_data():
     client = get_gsheet_client()
     if not client: return pd.DataFrame()
 
     try:
         sheet = client.open(GSHEET_NAME).sheet1
-        # 改用 get_all_values()：它不會因為標題重複或空白而報錯
+        # 1. 抓取所有資料 (包含標題跟內容)
         data = sheet.get_all_values()
         
-        # 定義我們期望的標準欄位
+        # 定義標準欄位
         expected_columns = [
             "日期", "週次", "班級", "評分項目", "檢查人員",
             "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數", 
             "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
         ]
 
-        # 情況 1: 試算表完全是空的
+        # 情況 A: 試算表完全是空的 -> 回傳標準空表
         if not data:
             return pd.DataFrame(columns=expected_columns)
             
-        # 情況 2: 有資料，嘗試解析
-        headers = data[0]
-        rows = data[1:]
+        # 情況 B: 有資料，開始解析
+        # 我們直接忽略試算表原本的標題 (因為它可能壞掉了)，直接用我們程式裡的標準標題
+        # 這樣可以避免 "Duplicate header" 或 "空白標題" 的錯誤
         
-        # 防呆判定：如果讀到的標題跟我們預期的一樣多，我們就直接用標準標題覆蓋 (不管它原本寫什麼亂碼或空白)
-        # 這樣可以完美解決 ['0', ''] 這種錯誤
-        if len(headers) == len(expected_columns):
-            df = pd.DataFrame(rows, columns=expected_columns)
-        else:
-            # 如果欄位數量不對 (可能您之後自己加了欄位)，我們就讓 pandas 自動處理重複名稱
-            # 並把空白標題補上名字，防止出錯
-            safe_headers = [h if h.strip() else f"Unknown_Col_{i}" for i, h in enumerate(headers)]
-            df = pd.DataFrame(rows, columns=safe_headers)
+        rows = data[1:] # 取出第一列之後的所有資料
+        if not rows:
+             return pd.DataFrame(columns=expected_columns)
+
+        # --- 關鍵修正：強行統一資料寬度 ---
+        # 如果試算表某一列特別長(有殘留資料)或特別短，我們強行把它變成跟標題一樣長
+        n_cols = len(expected_columns)
+        cleaned_rows = []
+        for row in rows:
+            if len(row) > n_cols:
+                # 如果資料太長，直接切掉多餘的
+                cleaned_rows.append(row[:n_cols])
+            elif len(row) < n_cols:
+                # 如果資料太短，補上空白
+                cleaned_rows.append(row + [""] * (n_cols - len(row)))
+            else:
+                cleaned_rows.append(row)
+        
+        # 建立 DataFrame (這時候寬度一定正確，不會報錯)
+        df = pd.DataFrame(cleaned_rows, columns=expected_columns)
 
         # 強制轉換布林值
         if "修正" in df.columns:
@@ -91,10 +102,11 @@ def load_data():
         return df
 
     except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"❌ 找不到 Google 試算表：**{GSHEET_NAME}**。請確認檔名正確且已共用給機器人信箱。")
+        st.error(f"❌ 找不到 Google 試算表：**{GSHEET_NAME}**。")
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"⚠️ 讀取資料庫發生錯誤: {e}")
+        # 如果真的還報錯，這裡會印出來，方便我們除錯
+        st.error(f"⚠️ 讀取資料庫發生錯誤 (最後防線): {e}")
         return pd.DataFrame()
 
 # 寫入資料
@@ -1061,3 +1073,4 @@ elif app_mode == "衛生組後台":
 
     else:
         st.error("密碼錯誤")
+
