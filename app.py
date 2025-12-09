@@ -19,6 +19,8 @@ st.set_page_config(page_title="衛生糾察評分系統", layout="wide")
 # 雲端資料庫設定
 GSHEET_NAME = "衛生糾察評分資料庫"  # 請確認您的 Google 試算表名稱完全一致
 
+# ⚠️ 注意：在 Streamlit Cloud 上，這些資料夾與 CSV 檔案在 App 重啟後會被清空/重置
+# 若需要永久儲存照片，建議未來改接 Imgur 或 Google Drive API
 IMG_DIR = "evidence_photos"
 CONFIG_FILE = "config.json"
 HOLIDAY_FILE = "holidays.csv"
@@ -37,16 +39,21 @@ if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 # 快取連線，避免重複登入
 @st.cache_resource
 def get_gsheet_client():
+    # 檢查 secrets 是否存在
     if "gcp_service_account" not in st.secrets:
-        st.error("⚠️ 未偵測到 Google 金鑰，請檢查 secrets.toml 設定！")
+        st.error("⚠️ 未偵測到 Google 金鑰，請檢查 Secrets 設定！")
         return None
     
-    # 定義權限範圍
-    scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-    # 從 secrets 讀取金鑰
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
-    client = gspread.authorize(creds)
-    return client
+    try:
+        # 定義權限範圍
+        scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        # 從 secrets 讀取金鑰 (Streamlit 會自動將 TOML 轉為 dict)
+        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        st.error(f"⚠️ Google 連線失敗: {e}")
+        return None
 
 # 讀取資料
 def load_data():
@@ -54,6 +61,7 @@ def load_data():
     if not client: return pd.DataFrame() # 回傳空表避免報錯
 
     try:
+        # 嘗試開啟試算表，若失敗則報錯
         sheet = client.open(GSHEET_NAME).sheet1
         data = sheet.get_all_records()
         
@@ -71,7 +79,7 @@ def load_data():
         return df
 
     except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"❌ 找不到 Google 試算表：**{GSHEET_NAME}**。請確認檔名正確且已共用給機器人。")
+        st.error(f"❌ 找不到 Google 試算表：**{GSHEET_NAME}**。請確認檔名正確且已共用給機器人信箱。")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"⚠️ 讀取資料庫發生錯誤: {e}")
@@ -95,7 +103,6 @@ def save_entry(new_entry):
              sheet.append_row(headers)
 
         # 整理要寫入的列 (必須依照順序轉成 list)
-        # 注意：dict 的順序不一定，所以要明確指定
         row_values = [
             str(new_entry.get("日期", "")),
             str(new_entry.get("週次", "")),
@@ -123,7 +130,6 @@ def save_entry(new_entry):
         st.error(f"⚠️ 寫入資料失敗: {e}")
 
 # 刪除資料 (覆蓋模式)
-# Google Sheets 刪除單行比較麻煩，這裡採用「讀出全部 -> 刪除 -> 清空 -> 寫回」的策略 (適合小數據量)
 def delete_entry(indices_to_delete):
     client = get_gsheet_client()
     if not client: return
@@ -133,7 +139,7 @@ def delete_entry(indices_to_delete):
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # 刪除指定 index 的資料 (注意：這裡的 index 是 dataframe 的 index)
+        # 刪除指定 index 的資料
         df = df.drop(indices_to_delete)
         
         # 寫回 Google Sheet
@@ -181,24 +187,7 @@ def delete_batch(start_date, end_date):
 # ==========================================
 
 def load_config():
-    # 優先從 Secrets 讀取
-    try:
-        if "system_config" in st.secrets:
-            return {
-                "semester_start": "2025-08-25",
-                "admin_password": st.secrets["system_config"]["admin_password"],
-                "team_password": st.secrets["system_config"]["team_password"],
-                "smtp_email": st.secrets["system_config"].get("smtp_email", ""),
-                "smtp_password": st.secrets["system_config"].get("smtp_password", "")
-            }
-    except: pass
-    
-    # Fallback 到本地檔案 (開發用)
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding='utf-8') as f:
-            return json.load(f)
-            
-    return {
+    default_config = {
         "semester_start": "2025-08-25",
         "admin_password": "1234",
         "team_password": "0000",
@@ -206,11 +195,25 @@ def load_config():
         "smtp_password": ""
     }
 
+    # 1. 優先從 Secrets 讀取 (Cloud 模式)
+    if "system_config" in st.secrets:
+        # 使用 update 來覆蓋預設值，避免缺少 key 導致錯誤
+        default_config.update(st.secrets["system_config"])
+        return default_config
+    
+    # 2. Fallback 到本地檔案 (開發用/暫存用)
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+            
+    return default_config
+
 def save_config(new_config):
-    # Google Sheets 模式下，config 建議還是存本地或 Secrets (無法動態存 secrets)
-    # 這裡維持存本地 JSON，但在 Cloud 上重啟會重置。
-    # 若要永久儲存 Config，建議也開一個 Google Sheet 專門存 Config。
-    # 但為了簡化，目前先維持這樣。
+    # 注意：無法動態寫入 secrets.toml
+    # 這裡寫入本地 JSON，但在 Cloud 上重啟會重置。
     with open(CONFIG_FILE, "w", encoding='utf-8') as f:
         json.dump(new_config, f, ensure_ascii=False)
 
@@ -219,9 +222,6 @@ SYSTEM_CONFIG = load_config()
 # ==========================================
 # 3. 名單處理 (維持 CSV 讀取)
 # ==========================================
-# 注意：名單檔案依然是 CSV，因為這些變動頻率低，且需要老師上傳
-# 若要完全雲端化，這三個檔案也應該存到 Google Sheets 的不同分頁
-# 目前 v35 先專注於「評分數據」上雲端
 
 # --- A. 導師名單讀取 ---
 @st.cache_data
@@ -339,6 +339,8 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
 def load_inspector_csv():
     inspectors = []
     debug_info = {"status": "init", "cols": [], "rows": 0}
+    
+    # 如果檔案不存在，回傳預設管理員
     if not os.path.exists(INSPECTOR_DUTY_FILE):
         return [{"label": "衛生組長 (預設)", "allowed_roles": ["內掃檢查","外掃檢查","垃圾/回收檢查","晨間打掃"], "assigned_classes": [], "id_prefix": "9"}], debug_info
     
@@ -427,7 +429,7 @@ for dept, count in dept_config.items():
             all_classes.append(c_name)
             structured_classes.append({"grade": grade, "name": c_name})
 
-# --- H. 申訴資料庫 ---
+# --- H. 申訴資料庫 (注意：雲端會重置 CSV) ---
 def load_appeals():
     if os.path.exists(APPEALS_FILE):
         df = pd.read_csv(APPEALS_FILE)
@@ -625,15 +627,14 @@ if app_mode == "我是糾察隊 (評分)":
 
             uploaded_files = None
             if role in ["內掃檢查", "外掃檢查"]:
-                uploaded_files = st.file_uploader("📸 上傳照片", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+                uploaded_files = st.file_uploader("📸 上傳照片 (雲端版暫時無法永久儲存照片)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
             
             submitted = st.form_submit_button("送出評分", use_container_width=True)
 
             if submitted:
                 img_path_str = ""
+                # 雲端版照片處理：暫存於記憶體或臨時資料夾，重啟後會消失
                 if uploaded_files:
-                    # 注意：照片上傳到雲端後，我們只能存路徑，但如果上傳到 Google Drive 就要改寫這裡
-                    # 這裡先維持存本機 (注意：雲端本機是暫時的)
                     saved_paths = []
                     timestamp = datetime.now().strftime("%H%M%S")
                     for i, u_file in enumerate(uploaded_files):
@@ -659,7 +660,7 @@ if app_mode == "我是糾察隊 (評分)":
                                     "日期": input_date, "週次": week_num, "班級": tclass,
                                     "評分項目": role, "檢查人員": inspector_name,
                                     "內掃原始分":0, "外掃原始分":0, "垃圾原始分":0, "晨間打掃原始分": morning_score,
-                                    "手机人數":0, "垃圾內掃原始分":0, "垃圾外掃原始分":0,
+                                    "手機人數":0, "垃圾內掃原始分":0, "垃圾外掃原始分":0,
                                     "備註": f"{note} ({tloc}) - {tname}", "照片路徑":"", "違規細項":"",
                                     "登錄時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                     "修正": is_correction, "晨掃未到者": f"{tid} {tname}"
@@ -1016,6 +1017,7 @@ elif app_mode == "衛生組後台":
         # --- Tab 5: 系統設定區 ---
         with tab5:
             st.header("⚙️ 系統設定")
+            st.warning("⚠️ 注意：在雲端版修改此處的密碼僅為暫時性，App 休眠後會重置為預設值。請聯絡管理員修改程式碼或 Secrets 設定。")
             st.subheader("1. 🔐 密碼與郵件設定")
             c1, c2 = st.columns(2)
             new_admin_pwd = c1.text_input("管理員密碼", value=SYSTEM_CONFIG["admin_password"], type="password")
@@ -1032,7 +1034,7 @@ elif app_mode == "衛生組後台":
                 st.success("設定已更新！")
 
             st.divider()
-            st.subheader("2. 📂 檔案上傳設定")
+            st.subheader("2. 📂 檔案上傳設定 (雲端重啟後會重置)")
             uploaded_roster = st.file_uploader("更新全校名單 (csv)", type=["csv"], key="roster_up")
             if uploaded_roster:
                 with open(ROSTER_FILE, "wb") as f: f.write(uploaded_roster.getbuffer())
