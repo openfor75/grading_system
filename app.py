@@ -6,6 +6,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
+# google 相關套件 (如果尚未安裝，需 pip install google-oauth2 gspread)
+# 但目前我們還沒寫入 Sheets 邏輯，先準備好讀取 Secrets 的接口
 
 # --- 設定網頁標題 ---
 st.set_page_config(page_title="衛生糾察評分系統", layout="wide")
@@ -16,7 +18,7 @@ st.set_page_config(page_title="衛生糾察評分系統", layout="wide")
 
 FILE_PATH = "score_data.csv"
 IMG_DIR = "evidence_photos"
-CONFIG_FILE = "config.json"
+# CONFIG_FILE = "config.json" # v34.0 棄用本地 config
 HOLIDAY_FILE = "holidays.csv"
 ROSTER_FILE = "全校名單.csv" 
 DUTY_FILE = "晨掃輪值.csv" 
@@ -27,26 +29,36 @@ TEACHER_MAIL_FILE = "導師名單.csv"
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 
 # ==========================================
-# 1. 設定檔與密碼管理
+# 1. 設定檔與密碼管理 (v34.0 改用 Secrets)
 # ==========================================
 
 def load_config():
-    default_config = {
+    # 優先從 Streamlit Secrets 讀取
+    try:
+        # 檢查是否存在 secrets
+        if "system_config" in st.secrets:
+            return {
+                "semester_start": "2025-08-25", # 開學日通常不敏感，可寫死或另存
+                "admin_password": st.secrets["system_config"]["admin_password"],
+                "team_password": st.secrets["system_config"]["team_password"],
+                "smtp_email": st.secrets["system_config"].get("smtp_email", ""),
+                "smtp_password": st.secrets["system_config"].get("smtp_password", "")
+            }
+    except FileNotFoundError:
+        pass # 本機沒有 secrets 檔時會報錯
+        
+    # 如果沒有 Secrets (例如第一次執行)，回傳預設值防止崩潰
+    return {
         "semester_start": "2025-08-25",
         "admin_password": "1234",
         "team_password": "0000",
         "smtp_email": "",
         "smtp_password": ""
     }
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding='utf-8') as f:
-            saved = json.load(f)
-            return {**default_config, **saved}
-    return default_config
 
-def save_config(new_config):
-    with open(CONFIG_FILE, "w", encoding='utf-8') as f:
-        json.dump(new_config, f, ensure_ascii=False)
+# 注意：Secrets 是唯讀的，不能從網頁「修改」並存回 Secrets。
+# 所以後台的「更新密碼」功能，在雲端版會失效（或者是我們改成存到 session_state 暫時生效）。
+# 為了安全，建議密碼修改直接去 Streamlit 後台改，不要在網頁上改。
 
 SYSTEM_CONFIG = load_config()
 
@@ -119,7 +131,7 @@ def load_roster_dict(csv_path=ROSTER_FILE):
 
 ROSTER_DICT, ROSTER_DEBUG = load_roster_dict()
 
-# --- C. 晨掃輪值 (完美保持不動) ---
+# --- C. 晨掃輪值 ---
 def get_daily_duty(target_date, csv_path=DUTY_FILE):
     duty_list = []
     status = "init"
@@ -447,6 +459,7 @@ if app_mode == "我是糾察隊 (評分)":
             )
 
         else:
+            # 一般模式
             st.markdown("### 🏫 選擇班級")
             if assigned_classes:
                 selected_class = st.radio("請點選班級", assigned_classes)
@@ -612,9 +625,11 @@ elif app_mode == "我是班上衛生股長":
                             msg = []
                             if row["內掃原始分"] > 0: msg.append(f"內掃扣 {row['內掃原始分']}")
                             if row["外掃原始分"] > 0: msg.append(f"外掃扣 {row['外掃原始分']}")
-                            if row["垃圾原始分"] > 0: msg.append(f"垃圾扣 {row['垃圾原始分']}")
+                            if row["垃圾內掃原始分"] > 0: msg.append(f"內掃垃圾扣 {row['垃圾內掃原始分']}")
+                            if row["垃圾外掃原始分"] > 0: msg.append(f"外掃垃圾扣 {row['垃圾外掃原始分']}")
                             if row["晨間打掃原始分"] > 0: msg.append(f"晨掃扣 {row['晨間打掃原始分']}")
                             if row["手機人數"] > 0: msg.append(f"手機 {row['手機人數']}人")
+                            if row["垃圾原始分"] > 0: msg.append(f"垃圾扣 {row['垃圾原始分']}") # 垃圾表格扣分
                             if msg: st.error(" | ".join(msg))
                         st.caption(f"檢查人員：{row['檢查人員']} | 時間：{row['登錄時間']}")
                         
@@ -711,7 +726,7 @@ elif app_mode == "衛生組後台":
                             
                             daily_group["內掃結算"] = daily_group["內掃原始分"].apply(lambda x: min(x, 2))
                             daily_group["外掃結算"] = daily_group["外掃原始分"].apply(lambda x: min(x, 2))
-                            # v32.0 垃圾統一結算 (新舊相容)
+                            # v32.0: 垃圾統一計算 (無分類+無簽名 都算在垃圾原始分)
                             daily_group["垃圾結算"] = (daily_group["垃圾原始分"] + daily_group["垃圾內掃原始分"] + daily_group["垃圾外掃原始分"]).apply(lambda x: min(x, 2))
                             daily_group["晨間打掃結算"] = daily_group["晨間打掃原始分"]
                             daily_group["手機扣分"] = daily_group["手機人數"] * 1
@@ -737,6 +752,8 @@ elif app_mode == "衛生組後台":
                                 if row["內掃原始分"] > 0: reasons.append(f"內掃({row['內掃原始分']})")
                                 if row["外掃原始分"] > 0: reasons.append(f"外掃({row['外掃原始分']})")
                                 if row["垃圾原始分"] > 0: reasons.append(f"垃圾({row['垃圾原始分']})")
+                                if row["垃圾內掃原始分"] > 0: reasons.append(f"垃圾內({row['垃圾內掃原始分']})")
+                                if row["垃圾外掃原始分"] > 0: reasons.append(f"垃圾外({row['垃圾外掃原始分']})")
                                 if row["晨間打掃原始分"] > 0: reasons.append(f"晨掃({row['晨間打掃原始分']})")
                                 if row["手機人數"] > 0: reasons.append(f"手機({row['手機人數']})")
                                 if "【優良】" in str(row["備註"]): reasons.append("✨優良")
@@ -765,7 +782,37 @@ elif app_mode == "衛生組後台":
                             numeric_cols = report.select_dtypes(include=['number']).columns
                             st.dataframe(report.style.format("{:.0f}", subset=numeric_cols).background_gradient(subset=["總成績"], cmap="RdYlGn", vmin=60, vmax=90))
 
-        # --- Tab 3: 郵件通知 (v32.0: 日期自選 + 預覽) ---
+        # --- Tab 2: 申訴管理 ---
+        with tab2:
+            st.write("### 📢 學生申訴案件")
+            appeals_df = load_appeals()
+            pending_appeals = appeals_df[appeals_df["狀態"] == "待處理"].copy()
+            if not pending_appeals.empty:
+                for i, row in pending_appeals.iterrows():
+                    with st.expander(f"【申訴】{row['日期']} {row['班級']} - 理由：{row['申訴理由']}"):
+                        st.write(f"申請時間：{row['申請時間']}")
+                        if "佐證照片" in row and str(row["佐證照片"]) != "nan" and row["佐證照片"]:
+                            st.write("**📸 申訴佐證照片：**")
+                            appeal_paths = str(row["佐證照片"]).split(";")
+                            acols = st.columns(3)
+                            for k, ap in enumerate(appeal_paths):
+                                if os.path.exists(ap): acols[k%3].image(ap, width=150)
+                        c1, c2 = st.columns(2)
+                        if c1.button("✅ 核准 (撤銷扣分)", key=f"approve_{i}"):
+                            delete_entry([row['原始紀錄ID']])
+                            real_idx = appeals_df[appeals_df['申請時間'] == row['申請時間']].index[0]
+                            update_appeal_status(real_idx, "已核准(撤銷)")
+                            st.success("已撤銷！")
+                            st.rerun()
+                        if c2.button("❌ 駁回", key=f"reject_{i}"):
+                            real_idx = appeals_df[appeals_df['申請時間'] == row['申請時間']].index[0]
+                            update_appeal_status(real_idx, "已駁回")
+                            st.warning("已駁回。")
+                            st.rerun()
+            else: st.info("無待處理案件。")
+            with st.expander("查看歷史紀錄"): st.dataframe(appeals_df)
+
+        # --- Tab 3: 郵件通知 ---
         with tab3:
             st.write("### 📧 寄送每日違規通知")
             
@@ -791,7 +838,7 @@ elif app_mode == "衛生組後台":
                             total_score = 0
                             reasons = []
                             for _, r in cls_records.iterrows():
-                                sc = (r["內掃原始分"] + r["外掃原始分"] + r["垃圾原始分"] + r["晨間打掃原始分"] + r["手機人數"])
+                                sc = (r["內掃原始分"] + r["外掃原始分"] + r["垃圾原始分"] + r["晨間打掃原始分"] + r["手機人數"] + r["垃圾內掃原始分"] + r["垃圾外掃原始分"])
                                 if sc > 0:
                                     total_score += sc
                                     reasons.append(r['評分項目'])
@@ -812,7 +859,7 @@ elif app_mode == "衛生組後台":
                                 content = f"{p_data['導師']} 老師您好：\n\n貴班 ({cls}) 於 {target_str} 有以下衛生違規紀錄：\n\n"
                                 for _, row in cls_records.iterrows():
                                     score = (row["內掃原始分"] + row["外掃原始分"] + row["垃圾原始分"] + 
-                                             row["晨間打掃原始分"] + row["手機人數"])
+                                             row["晨間打掃原始分"] + row["手機人數"] + row["垃圾內掃原始分"] + row["垃圾外掃原始分"])
                                     if score > 0:
                                         content += f"- {row['評分項目']}: {row['備註']} (扣 {score} 分)\n"
                                 content += f"\n當日總扣分：{p_data['總扣分']} 分\n\n請協助督導學生改進，謝謝！\n衛生組 敬上"
