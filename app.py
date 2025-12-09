@@ -12,7 +12,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="衛生糾察評分系統(完整修復版)", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="衛生糾察評分系統(最終修復版)", layout="wide", page_icon="🧹")
 
 # ==========================================
 # 0. 基礎設定與時區
@@ -45,7 +45,7 @@ EXPECTED_COLUMNS = [
 ]
 
 # ==========================================
-# 1. Google Sheets 連線與工具函式 (快取優化版)
+# 1. Google Sheets 連線與工具函式
 # ==========================================
 
 @st.cache_resource
@@ -63,8 +63,8 @@ def get_gspread_client():
         st.error(f"❌ Google連線失敗: {e}")
         return None
 
-# 快取試算表物件 (1小時)
-@st.cache_resource(ttl=3600)
+# 快取試算表物件 (6小時 = 21600秒)
+@st.cache_resource(ttl=21600)
 def get_spreadsheet_object():
     client = get_gspread_client()
     if not client: return None
@@ -99,12 +99,19 @@ def get_worksheet(tab_name):
     return None
 
 def clean_id(val):
-    """學號格式清理"""
+    """
+    超級學號清潔劑：確保學號格式絕對一致
+    例如: 11005.0 -> "11005", " 11005 " -> "11005"
+    """
     try:
         if pd.isna(val) or val == "": return ""
-        if isinstance(val, float): val = int(val)
+        # 先轉浮點數再轉整數，可以去除 .0
+        val_float = float(val)
+        val_int = int(val_float)
+        return str(val_int).strip()
+    except:
+        # 如果無法轉數字，就直接去空白
         return str(val).strip()
-    except: return str(val).strip()
 
 # ==========================================
 # 2. 資料讀取 (針對頻率做優化)
@@ -174,25 +181,31 @@ def overwrite_all_data(df):
         except: return False
     return False
 
-# --- 優化點：全校名單 TTL 設為 1 小時 ---
-@st.cache_data(ttl=3600)
+# --- 優化點：TTL 設為 6 小時 (21600秒) ---
+@st.cache_data(ttl=21600)
 def load_roster_dict():
+    """讀取全校名單 (加入強力 clean_id)"""
     ws = get_worksheet(SHEET_TABS["roster"])
     roster_dict = {}
     if ws:
         try:
             df = pd.DataFrame(ws.get_all_records())
+            # 寬鬆匹配欄位名稱
             id_col = next((c for c in df.columns if "學號" in c), None)
             class_col = next((c for c in df.columns if "班級" in c), None)
+            
             if id_col and class_col:
                 for _, row in df.iterrows():
+                    # 這裡使用 clean_id 確保名單裡的學號格式乾淨
                     sid = clean_id(row[id_col])
-                    if sid: roster_dict[sid] = str(row[class_col]).strip()
-        except: pass
+                    if sid: 
+                        roster_dict[sid] = str(row[class_col]).strip()
+        except Exception as e:
+            pass
     return roster_dict
 
-# --- 優化點：導師名單 TTL 設為 1 小時 ---
-@st.cache_data(ttl=3600)
+# --- 優化點：TTL 設為 6 小時 ---
+@st.cache_data(ttl=21600)
 def load_teacher_emails():
     ws = get_worksheet(SHEET_TABS["teachers"])
     email_dict = {}
@@ -212,8 +225,8 @@ def load_teacher_emails():
         except: pass
     return email_dict
 
-# --- 優化點：糾察名單 TTL 延長至 1 小時 ---
-@st.cache_data(ttl=3600)
+# --- 優化點：TTL 設為 6 小時 ---
+@st.cache_data(ttl=21600)
 def load_inspector_list():
     ws = get_worksheet(SHEET_TABS["inspectors"])
     default = [{"label": "測試人員", "allowed_roles": ["內掃檢查"], "assigned_classes": [], "id_prefix": "測"}]
@@ -265,13 +278,14 @@ def get_daily_duty(target_date):
             today_df = df[df[date_col] == t_date]
             res = []
             for _, row in today_df.iterrows():
+                # 這裡也要用 clean_id
                 res.append({"學號": clean_id(row[id_col]), "掃地區域": str(row[loc_col]).strip() if loc_col else "", "已完成打掃": False})
             return res, "success"
         return [], "missing_cols"
     except: return [], "error"
 
-# --- 優化點：設定檔 TTL 設為 1 小時 ---
-@st.cache_data(ttl=3600)
+# --- 優化點：TTL 設為 6 小時 ---
+@st.cache_data(ttl=21600)
 def load_settings():
     ws = get_worksheet(SHEET_TABS["settings"])
     config = {"semester_start": "2025-08-25"}
@@ -315,20 +329,13 @@ def send_email(to_email, subject, body):
 
 # --- 輔助函式：檢查是否重複評分 ---
 def check_duplicate_record(df, check_date, inspector, role, target_class=None):
-    """回傳 True 代表已經評過分了"""
     if df.empty: return False
     try:
-        # 轉成文字比對，避免格式問題
         df["日期Str"] = df["日期"].astype(str)
         check_date_str = str(check_date)
-        
-        # 基礎篩選：日期 + 檢查人員 + 項目
         mask = (df["日期Str"] == check_date_str) & (df["檢查人員"] == inspector) & (df["評分項目"] == role)
-        
-        # 如果有指定班級 (一般內外掃)，要多篩選班級
         if target_class:
             mask = mask & (df["班級"] == target_class)
-            
         return not df[mask].empty
     except:
         return False
@@ -367,6 +374,12 @@ today_tw = now_tw.date()
 
 st.sidebar.title("🏫 功能選單")
 app_mode = st.sidebar.radio("請選擇模式", ["我是糾察隊(評分)", "我是班上衛生股長", "衛生組後台"])
+
+# 這裡增加一個重新載入按鈕，方便使用者強制更新快取
+if st.sidebar.button("🔄 強制更新全校名單(當班級抓不到時用)"):
+    st.cache_data.clear()
+    st.success("快取已清除，請重新操作")
+    st.rerun()
 
 if st.sidebar.checkbox("顯示系統連線狀態", value=True):
     if get_gspread_client(): st.sidebar.success("✅ Google Sheets 連線正常")
@@ -409,19 +422,15 @@ if app_mode == "我是糾察隊(評分)":
             week_num = get_week_num(input_date)
             st.caption(f"📅 第 {week_num} 週")
             
-            # 預先讀取資料以檢查重複
             main_df = load_main_data()
 
             if role == "晨間打掃":
-                # --- 功能修復：加入重複檢查 ---
                 if check_duplicate_record(main_df, input_date, inspector_name, role):
-                    st.warning(f"⚠️ 系統偵測：您今天 ({input_date}) 已經送出過「晨間打掃」的紀錄囉！請勿重複評分。")
+                    st.warning(f"⚠️ 系統偵測：您今天 ({input_date}) 已經送出過「晨間打掃」的紀錄囉！")
 
                 duty_list, status = get_daily_duty(input_date)
                 if status == "success":
                     st.markdown(f"### 📋 {input_date} 晨掃點名")
-                    
-                    # --- 功能修復：顯示應到人數 ---
                     total_duty = len(duty_list)
                     st.metric("今日應到人數", f"{total_duty} 人")
                     
@@ -437,11 +446,10 @@ if app_mode == "我是糾察隊(評分)":
                             else:
                                 count = 0
                                 for _, r in absent.iterrows():
-                                    tid = str(r["學號"]).strip() # 確保是字串
+                                    tid = clean_id(r["學號"]) # 確保這裡也用 clean_id
                                     tloc = r["掃地區域"]
-                                    # --- 功能修復：ROSTER_DICT 查詢強化 ---
-                                    # 先嘗試直接查，若無則確保格式再查一次
-                                    stu_class = ROSTER_DICT.get(tid, "查無班級")
+                                    # 如果找不到班級，顯示 "查無(學號)" 方便除錯
+                                    stu_class = ROSTER_DICT.get(tid, f"查無({tid})")
                                     
                                     save_entry({**base, "班級": stu_class, "評分項目": role, "晨間打掃原始分": morning_score, "備註": f"晨掃未到 ({tloc})", "晨掃未到者": tid})
                                     count += 1
@@ -477,7 +485,6 @@ if app_mode == "我是糾察隊(評分)":
                     selected_class = st.radio("班級", [c["name"] for c in structured_classes if c["grade"] == g], horizontal=True)
                 
                 if selected_class:
-                    # --- 功能修復：針對單一班級的重複評分檢查 ---
                     if check_duplicate_record(main_df, input_date, inspector_name, role, selected_class):
                          st.warning(f"⚠️ 注意：您今天已經評過「{selected_class}」了！")
 
