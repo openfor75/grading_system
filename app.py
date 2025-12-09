@@ -50,48 +50,16 @@ SYSTEM_CONFIG = load_config()
 # 2. 名單與資料處理
 # ==========================================
 
-# --- A. 晨間打掃 ---
-def get_daily_duty(target_date, csv_path=DUTY_FILE):
-    duty_list = []
-    status = "init"
-    if os.path.exists(csv_path):
-        encodings = ['utf-8', 'big5', 'cp950', 'utf-8-sig']
-        df = None
-        for enc in encodings:
-            try:
-                df = pd.read_csv(csv_path, encoding=enc, dtype=str)
-                df.columns = df.columns.str.strip()
-                break
-            except:
-                continue
-        if df is not None:
-            date_col = next((c for c in df.columns if "日期" in c or "時間" in c), None)
-            id_col = next((c for c in df.columns if "學號" in c), None)
-            name_col = next((c for c in df.columns if "姓名" in c), None)
-            loc_col = next((c for c in df.columns if "地點" in c or "區域" in c), None)
-            if date_col and id_col:
-                try: df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.date
-                except: pass
-                target_date_obj = target_date if isinstance(target_date, date) else target_date.date()
-                today_df = df[df[date_col] == target_date_obj]
-                if not today_df.empty:
-                    for _, row in today_df.iterrows():
-                        s_id = str(row[id_col]).strip()
-                        s_name = str(row[name_col]).strip() if name_col else ""
-                        s_loc = str(row[loc_col]).strip() if loc_col else "未指定"
-                        duty_list.append({"學號": s_id, "姓名": s_name, "掃地區域": s_loc, "已完成打掃": False})
-                    status = "success"
-                else: status = "no_data_for_date"
-            else: status = "missing_columns"
-        else: status = "read_failed"
-    else: status = "file_not_found"
-    return duty_list, status
+# --- A. 晨間打掃名單 (預設) ---
+MORNING_TEAM_LIST = [] 
+MORNING_OPTIONS = []
 
 # --- B. 全校名單 ---
 @st.cache_data
 def load_roster_dict(csv_path=ROSTER_FILE):
     roster_dict = {}
     debug_info = {"status": "init", "cols": [], "error": ""}
+    
     if os.path.exists(csv_path):
         encodings_to_try = ['utf-8', 'big5', 'cp950', 'utf-8-sig']
         df = None
@@ -106,6 +74,7 @@ def load_roster_dict(csv_path=ROSTER_FILE):
             except Exception as e:
                 debug_info["error"] = str(e)
                 continue
+        
         if df is not None:
             id_col = next((c for c in df.columns if "學號" in c), None)
             class_col = next((c for c in df.columns if "班級" in c), None)
@@ -118,18 +87,78 @@ def load_roster_dict(csv_path=ROSTER_FILE):
             else:
                 debug_info["status"] = "missing_columns"
                 debug_info["cols"] = list(df.columns)
-        else: debug_info["status"] = "read_failed"
+        else:
+            debug_info["status"] = "read_failed"
     return roster_dict, debug_info
 
 ROSTER_DICT, ROSTER_DEBUG = load_roster_dict()
 
-# --- C. 糾察隊名單 (v27.0: 增加 raw_id 用於分組) ---
+# --- C. 晨掃輪值表讀取 (v28.0: 加強錯誤防護) ---
+def get_daily_duty(target_date, csv_path=DUTY_FILE):
+    duty_list = []
+    status = "init"
+    
+    if os.path.exists(csv_path):
+        encodings = ['utf-8', 'big5', 'cp950', 'utf-8-sig']
+        df = None
+        for enc in encodings:
+            try:
+                df = pd.read_csv(csv_path, encoding=enc, dtype=str)
+                df.columns = df.columns.str.strip()
+                break
+            except:
+                continue
+        
+        if df is not None:
+            date_col = next((c for c in df.columns if "日期" in c or "時間" in c), None)
+            id_col = next((c for c in df.columns if "學號" in c), None)
+            name_col = next((c for c in df.columns if "姓名" in c), None)
+            loc_col = next((c for c in df.columns if "地點" in c or "區域" in c), None)
+            
+            if date_col and id_col:
+                try:
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.date
+                except Exception as e:
+                    return [], f"日期轉換錯誤: {str(e)}"
+                
+                target_date_obj = target_date if isinstance(target_date, date) else target_date.date()
+                today_df = df[df[date_col] == target_date_obj]
+                
+                if not today_df.empty:
+                    for _, row in today_df.iterrows():
+                        try:
+                            s_id = str(row[id_col]).strip()
+                            s_name = str(row[name_col]).strip() if name_col else ""
+                            s_loc = str(row[loc_col]).strip() if loc_col else "未指定"
+                            
+                            duty_list.append({
+                                "學號": s_id,
+                                "姓名": s_name,
+                                "掃地區域": s_loc,
+                                "已完成打掃": False 
+                            })
+                        except:
+                            continue # 跳過壞掉的列
+                    status = "success"
+                else:
+                    status = "no_data_for_date"
+            else:
+                status = "missing_columns"
+        else:
+            status = "read_failed"
+    else:
+        status = "file_not_found"
+        
+    return duty_list, status
+
+# --- D. 糾察隊名單 ---
 @st.cache_data
 def load_inspector_csv():
     inspectors = []
-    debug_info = {"status": "init", "cols": [], "rows": 0}
+    debug_info = {"status": "init", "cols": [], "rows": 0, "name_col": None, "role_col": None}
+    
     if not os.path.exists(INSPECTOR_DUTY_FILE):
-        return [{"label": "衛生組長 (預設)", "role": "晨間打掃", "raw_role": "晨掃", "assigned_classes": [], "id_prefix": "9"}], debug_info
+        return [{"label": "衛生組長 (預設)", "allowed_roles": ["內掃檢查","外掃檢查","垃圾/回收檢查","晨間打掃"], "assigned_classes": [], "id_prefix": "9"}], debug_info
     
     encodings = ['utf-8', 'big5', 'cp950', 'utf-8-sig', 'gbk']
     df = None
@@ -137,12 +166,15 @@ def load_inspector_csv():
         try:
             df = pd.read_csv(INSPECTOR_DUTY_FILE, encoding=enc, dtype=str)
             df.columns = df.columns.str.strip()
-            if any(k in "".join(df.columns) for k in ["姓名", "Name", "學號"]): break
-        except: continue
+            if any(k in "".join(df.columns) for k in ["姓名", "Name", "學號"]):
+                break
+        except:
+            continue
             
     if df is not None:
         debug_info["cols"] = list(df.columns)
         debug_info["rows"] = len(df)
+        
         name_col = next((c for c in df.columns if "姓名" in c), None)
         id_col = next((c for c in df.columns if "學號" in c or "編號" in c), None)
         role_col = next((c for c in df.columns if "負責" in c or "項目" in c or "職位" in c), None)
@@ -162,21 +194,22 @@ def load_inspector_csv():
                         s_classes = [c.strip() for c in raw_scope.replace("、", ";").replace(",", ";").split(";") if c.strip()]
 
                 allowed_roles = []
-                if "組長" in s_raw_role: allowed_roles = ["內掃檢查", "外掃檢查", "垃圾/回收檢查", "晨間打掃"]
-                elif "機動" in s_raw_role: allowed_roles = ["內掃檢查", "外掃檢查", "垃圾/回收檢查"] 
+                if "組長" in s_raw_role:
+                    allowed_roles = ["內掃檢查", "外掃檢查", "垃圾/回收檢查", "晨間打掃"]
+                elif "機動" in s_raw_role:
+                    allowed_roles = ["內掃檢查", "外掃檢查", "垃圾/回收檢查"] 
                 else:
                     if "外掃" in s_raw_role: allowed_roles.append("外掃檢查")
                     if "垃圾" in s_raw_role or "回收" in s_raw_role: allowed_roles.append("垃圾/回收檢查")
                     if "晨" in s_raw_role: allowed_roles.append("晨間打掃")
                     if "內掃" in s_raw_role: allowed_roles.append("內掃檢查")
+                
                 if not allowed_roles: allowed_roles = ["內掃檢查"]
 
                 label = f"{s_name}"
                 if s_id: label = f"{s_name} ({s_id})"
-                
-                # 擷取學號第一個字當作分組依據
                 prefix = s_id[0] if s_id else "其"
-
+                
                 inspectors.append({
                     "label": label,
                     "allowed_roles": allowed_roles,
@@ -184,16 +217,19 @@ def load_inspector_csv():
                     "raw_role": s_raw_role,
                     "id_prefix": prefix
                 })
-        else: debug_info["status"] = "missing_name_col"
-    else: debug_info["status"] = "read_failed"
+        else:
+            debug_info["status"] = "missing_name_col"
+    else:
+        debug_info["status"] = "read_failed"
     
     if not inspectors:
         inspectors.append({"label": "測試人員", "allowed_roles": ["內掃檢查"], "assigned_classes": [], "id_prefix": "測"})
+        
     return inspectors, debug_info
 
 INSPECTOR_LIST, INSPECTOR_DEBUG = load_inspector_csv()
 
-# --- D. 假日與週次 ---
+# --- E. 假日與週次 ---
 def load_holidays():
     if os.path.exists(HOLIDAY_FILE): return pd.read_csv(HOLIDAY_FILE)
     return pd.DataFrame(columns=["日期", "原因"])
@@ -218,13 +254,11 @@ def get_school_week(date_obj):
     if week_num < 1: week_num = 0 
     return week_num, start_date
 
-# --- E. 班級產生 ---
+# --- F. 班級產生 ---
 grades = ["一年級", "二年級", "三年級"]
-grade_map = {"一年級": "1", "二年級": "2", "三年級": "3"} # 用於分組
 dept_config = {"商經科": 3, "應英科": 1, "資處科": 1, "家政科": 2, "服裝科": 2}
 class_labels = ["甲", "乙", "丙"] 
 all_classes = []
-# 建立一個結構化的班級列表 [ ("一年級", "商一甲"), ... ]
 structured_classes = [] 
 
 for dept, count in dept_config.items():
@@ -237,7 +271,7 @@ for dept, count in dept_config.items():
             all_classes.append(c_name)
             structured_classes.append({"grade": grade, "name": c_name})
 
-# --- F. 主資料庫 ---
+# --- G. 主資料庫 ---
 def load_data():
     if os.path.exists(FILE_PATH):
         df = pd.read_csv(FILE_PATH)
@@ -276,7 +310,7 @@ def delete_batch(start_date, end_date):
     df_remaining.to_csv(FILE_PATH, index=False, encoding="utf-8-sig")
     return mask.sum()
 
-# --- G. 申訴資料庫 ---
+# --- H. 申訴資料庫 ---
 def load_appeals():
     if os.path.exists(APPEALS_FILE):
         df = pd.read_csv(APPEALS_FILE)
@@ -302,14 +336,12 @@ st.sidebar.title("🏫 功能選單")
 app_mode = st.sidebar.radio("請選擇模式", ["我是糾察隊 (評分)", "我是班上衛生股長", "衛生組後台"])
 
 # ------------------------------------------
-# 模式一：糾察隊評分 (v27.0 手機優化版)
+# 模式一：糾察隊評分
 # ------------------------------------------
 if app_mode == "我是糾察隊 (評分)":
     st.title("📝 衛生糾察評分系統")
     
-    # 身份驗證
-    if "team_logged_in" not in st.session_state:
-        st.session_state["team_logged_in"] = False
+    if "team_logged_in" not in st.session_state: st.session_state["team_logged_in"] = False
 
     if not st.session_state["team_logged_in"]:
         with st.expander("🔐 身份驗證", expanded=True):
@@ -318,45 +350,30 @@ if app_mode == "我是糾察隊 (評分)":
                 if input_code == SYSTEM_CONFIG["team_password"]:
                     st.session_state["team_logged_in"] = True
                     st.rerun()
-                else:
-                    st.error("通行碼錯誤")
+                else: st.error("通行碼錯誤")
     
     if st.session_state["team_logged_in"]:
-        # --- 1. 選擇人員 (手機優化：兩階段 Radio) ---
         st.markdown("### 👤 請選擇您的姓名")
-        
-        # 步驟 1: 選擇學號開頭 (分組)
-        # 找出所有前綴
         prefixes = sorted(list(set([p["id_prefix"] for p in INSPECTOR_LIST])))
-        # 轉換顯示名稱 (例如: 3 -> 3開頭)
         prefix_labels = [f"{p}開頭" for p in prefixes]
-        
-        # 使用 Radio 水平排列
         selected_prefix_label = st.radio("步驟 1：選擇學號開頭", prefix_labels, horizontal=True)
-        selected_prefix = selected_prefix_label[0] # 取回數字
-        
-        # 步驟 2: 選擇該組別的人員
+        selected_prefix = selected_prefix_label[0] 
         filtered_inspectors = [p for p in INSPECTOR_LIST if p["id_prefix"] == selected_prefix]
         inspector_options = [p["label"] for p in filtered_inspectors]
+        inspector_name = st.radio("步驟 2：點選姓名", inspector_options) 
         
-        inspector_name = st.radio("步驟 2：點選姓名", inspector_options) # 直式 Radio，不跳鍵盤
-        
-        # --- 取得資料 ---
         current_inspector_data = next((p for p in INSPECTOR_LIST if p["label"] == inspector_name), None)
         allowed_roles = current_inspector_data.get("allowed_roles", ["內掃檢查"])
         assigned_classes = current_inspector_data.get("assigned_classes", [])
         
         st.markdown("---")
         
-        # --- 2. 選擇檢查項目 ---
         if len(allowed_roles) > 1:
-            # 這裡用 radio 比較好點
             role = st.radio("請選擇檢查項目", allowed_roles, horizontal=True)
         else:
             st.info(f"📋 您的負責項目：**{allowed_roles[0]}**")
             role = allowed_roles[0]
         
-        # 變數區
         selected_class = None
         edited_morning_df = None
         edited_trash_df = None
@@ -369,11 +386,8 @@ if app_mode == "我是糾察隊 (評分)":
         is_holiday = str(input_date) in holidays_df["日期"].values
         if is_holiday: st.warning(f"⚠️ 注意：{input_date} 是假日。")
 
-        # --- 3. 根據模式顯示介面 ---
-        
         if role == "晨間打掃":
-            # 晨掃 (維持表格)
-            daily_duty_list, duty_status, _ = get_daily_duty(input_date)
+            daily_duty_list, duty_status = get_daily_duty(input_date)
             if duty_status == "success":
                 st.markdown(f"### 📋 今日 ({input_date}) 晨掃點名")
                 st.info("👇 請在 **「已完成打掃」** 欄位打勾。**未打勾者** 將被視為缺席。")
@@ -389,10 +403,9 @@ if app_mode == "我是糾察隊 (評分)":
                 absent_count = total_count - checked_count
                 st.caption(f"📊 應到: {total_count} | 實到: {checked_count} | ⚠️ 缺席: {absent_count}")
             elif duty_status == "no_data_for_date": st.warning(f"⚠️ 找不到 {input_date} 的輪值資料。")
-            else: st.error("⚠️ 讀取輪值表失敗。")
+            else: st.error(f"⚠️ 讀取輪值表失敗 ({duty_status})。")
 
         elif role == "垃圾/回收檢查":
-            # 垃圾 (維持表格)
             st.info(f"📅 第 {week_num} 週 (垃圾評分)")
             trash_scope = st.radio("請選擇評分區域：", ["內掃區域", "外掃區域"], horizontal=True)
             trash_category = st.radio("請選擇違規項目：", ["一般垃圾", "紙類", "網袋", "其他回收"], horizontal=True)
@@ -401,7 +414,6 @@ if app_mode == "我是糾察隊 (評分)":
             trash_data = [{"班級": cls, "內掃區違規": False, "外掃區違規": False} for cls in all_classes]
             trash_df_init = pd.DataFrame(trash_data)
             
-            # 動態顯示欄位
             col_cfg = {"班級": st.column_config.TextColumn("班級", disabled=True)}
             if trash_scope == "內掃區域":
                 col_cfg["內掃區違規"] = st.column_config.CheckboxColumn(f"🏠 {trash_category}違規", default=False)
@@ -411,29 +423,21 @@ if app_mode == "我是糾察隊 (評分)":
                 display_cols = ["班級", "外掃區違規"]
 
             edited_trash_df = st.data_editor(
-                trash_df_init[display_cols], # 只顯示相關欄位
+                trash_df_init[display_cols],
                 column_config=col_cfg,
                 hide_index=True, height=400, use_container_width=True
             )
 
         else:
-            # 一般模式 (內掃/外掃) -> 需要選手機優化的班級選單
             st.markdown("### 🏫 選擇班級")
-            
             if assigned_classes:
-                # 如果有指定班級，直接用 Radio 顯示 (通常只有 1-4 個，很適合 Radio)
                 selected_class = st.radio("請點選班級", assigned_classes)
             else:
-                # 全校班級 -> 使用兩階段 Radio
-                # 步驟 1: 選年級
                 s_grade = st.radio("步驟 1：選擇年級", grades, horizontal=True)
-                # 步驟 2: 選該年級的班級
                 classes_in_grade = [c["name"] for c in structured_classes if c["grade"] == s_grade]
-                selected_class = st.radio("步驟 2：選擇班級", classes_in_grade, horizontal=True) # 橫向排列省空間
-                
+                selected_class = st.radio("步驟 2：選擇班級", classes_in_grade, horizontal=True) 
             st.info(f"📍 目前評分：**{selected_class}**")
 
-        # --- 評分表單 ---
         with st.form("scoring_form"):
             in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
             is_perfect = False
@@ -442,8 +446,6 @@ if app_mode == "我是糾察隊 (評分)":
                 check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True)
                 if check_status == "❌ 發現違規":
                     st.subheader("違規事項")
-                    # 改用 slider 或 +- 按鈕更好點? 這裡先維持 number_input 因為有鍵盤問題
-                    # 其實 number_input 在手機上還好，因為它有 +/- 按鈕
                     in_score = st.number_input("🧹 內掃扣分", min_value=0, step=1)
                     note = st.text_input("違規說明", placeholder="例：黑板未擦")
                     phone_count = st.number_input("📱 玩手機人數", min_value=0, step=1)
@@ -491,7 +493,6 @@ if app_mode == "我是糾察隊 (評分)":
                         saved_paths.append(full_path)
                     img_path_str = ";".join(saved_paths)
 
-                # 儲存邏輯 (同 v26)
                 if role == "晨間打掃":
                     if edited_morning_df is None: st.error("無資料")
                     else:
@@ -520,7 +521,6 @@ if app_mode == "我是糾察隊 (評分)":
                     else:
                         saved_count = 0
                         for _, row in edited_trash_df.iterrows():
-                            # 判斷欄位名稱 (因上面動態調整過)
                             is_in_violation = row.get("內掃區違規", False)
                             is_out_violation = row.get("外掃區違規", False)
                             
@@ -568,20 +568,22 @@ if app_mode == "我是糾察隊 (評分)":
                     }
                     save_entry(entry)
                     st.success(f"✅ 登記完成！")
+    else:
+        st.info("👈 請在左側輸入通行碼以開始評分")
 
 # ------------------------------------------
-# 模式二與三 (保持不變)
-# ------------------------------------------
-# (為節省篇幅，模式二與模式三的程式碼與 v26.0 相同，請直接使用上方 v26 的後半段程式碼)
-# ... 請將 v26 的 "模式二" 與 "模式三" 程式碼貼於此處 ...
+# 模式二：班上衛生股長 (v28.0: Radio 優化)
 # ------------------------------------------
 elif app_mode == "我是班上衛生股長":
-    # ... (請貼上 v26 模式二程式碼) ...
     st.title("🔎 班級成績查詢與申訴")
-    # (同 v26)
     df = load_data()
     if not df.empty:
-        search_class = st.selectbox("請選擇您的班級", all_classes)
+        # --- 兩階段選單 ---
+        st.write("請選擇您的班級：")
+        s_grade = st.radio("步驟 1：選擇年級", grades, horizontal=True)
+        classes_in_grade = [c["name"] for c in structured_classes if c["grade"] == s_grade]
+        search_class = st.radio("步驟 2：選擇班級", classes_in_grade, horizontal=True)
+        
         class_df = df[df["班級"] == search_class].copy()
         if not class_df.empty:
             class_df = class_df.sort_values(by="登錄時間", ascending=False).reset_index()
@@ -651,6 +653,9 @@ elif app_mode == "我是班上衛生股長":
         else: st.success("🎉 目前沒有違規紀錄")
     else: st.info("尚無資料")
 
+# ------------------------------------------
+# 模式三：衛生組後台
+# ------------------------------------------
 elif app_mode == "衛生組後台":
     st.title("📊 衛生組長管理後台")
     password = st.text_input("請輸入管理密碼", type="password")
