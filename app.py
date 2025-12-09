@@ -648,3 +648,4 @@ elif app_mode == "衛生組後台":
                 save_config(SYSTEM_CONFIG); st.success("已更新")
             st.file_uploader("上傳全校名單", key="u1"); st.file_uploader("上傳導師名單", key="u2"); st.file_uploader("上傳糾察名單", key="u3"); st.file_uploader("上傳輪值表", key="u4")
     else: st.error("密碼錯誤")
+```
