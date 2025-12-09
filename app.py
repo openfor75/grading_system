@@ -20,7 +20,6 @@ st.set_page_config(page_title="衛生糾察評分系統", layout="wide")
 GSHEET_NAME = "衛生糾察評分資料庫"  # 請確認您的 Google 試算表名稱完全一致
 
 # ⚠️ 注意：在 Streamlit Cloud 上，這些資料夾與 CSV 檔案在 App 重啟後會被清空/重置
-# 若需要永久儲存照片，建議未來改接 Imgur 或 Google Drive API
 IMG_DIR = "evidence_photos"
 CONFIG_FILE = "config.json"
 HOLIDAY_FILE = "holidays.csv"
@@ -33,21 +32,16 @@ TEACHER_MAIL_FILE = "導師名單.csv"
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 
 # ==========================================
-# 1. Google Sheets 連線與資料庫函式 (v35.0 核心)
+# 1. Google Sheets 連線與資料庫函式 (終極防禦版)
 # ==========================================
 
-# 快取連線，避免重複登入
 @st.cache_resource
 def get_gsheet_client():
-    # 檢查 secrets 是否存在
     if "gcp_service_account" not in st.secrets:
         st.error("⚠️ 未偵測到 Google 金鑰，請檢查 Secrets 設定！")
         return None
-    
     try:
-        # 定義權限範圍
         scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        # 從 secrets 讀取金鑰 (Streamlit 會自動將 TOML 轉為 dict)
         creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
         client = gspread.authorize(creds)
         return client
@@ -55,27 +49,45 @@ def get_gsheet_client():
         st.error(f"⚠️ Google 連線失敗: {e}")
         return None
 
-# 讀取資料
+# 讀取資料 (這裡做了大修改：防禦標題錯誤)
 def load_data():
     client = get_gsheet_client()
-    if not client: return pd.DataFrame() # 回傳空表避免報錯
+    if not client: return pd.DataFrame()
 
     try:
-        # 嘗試開啟試算表，若失敗則報錯
         sheet = client.open(GSHEET_NAME).sheet1
-        data = sheet.get_all_records()
+        # 改用 get_all_values()：它不會因為標題重複或空白而報錯
+        data = sheet.get_all_values()
         
-        if not data: # 如果是空的或者是新表
-            return pd.DataFrame(columns=[
-                "日期", "週次", "班級", "評分項目", "檢查人員",
-                "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數", 
-                "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
-            ])
+        # 定義我們期望的標準欄位
+        expected_columns = [
+            "日期", "週次", "班級", "評分項目", "檢查人員",
+            "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數", 
+            "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
+        ]
+
+        # 情況 1: 試算表完全是空的
+        if not data:
+            return pd.DataFrame(columns=expected_columns)
             
-        df = pd.DataFrame(data)
-        # 強制轉換布林值 (Google Sheet 存下來可能會變 TRUE/FALSE 字串)
+        # 情況 2: 有資料，嘗試解析
+        headers = data[0]
+        rows = data[1:]
+        
+        # 防呆判定：如果讀到的標題跟我們預期的一樣多，我們就直接用標準標題覆蓋 (不管它原本寫什麼亂碼或空白)
+        # 這樣可以完美解決 ['0', ''] 這種錯誤
+        if len(headers) == len(expected_columns):
+            df = pd.DataFrame(rows, columns=expected_columns)
+        else:
+            # 如果欄位數量不對 (可能您之後自己加了欄位)，我們就讓 pandas 自動處理重複名稱
+            # 並把空白標題補上名字，防止出錯
+            safe_headers = [h if h.strip() else f"Unknown_Col_{i}" for i, h in enumerate(headers)]
+            df = pd.DataFrame(rows, columns=safe_headers)
+
+        # 強制轉換布林值
         if "修正" in df.columns:
             df["修正"] = df["修正"].apply(lambda x: True if str(x).upper() == "TRUE" else False)
+            
         return df
 
     except gspread.exceptions.SpreadsheetNotFound:
@@ -85,7 +97,7 @@ def load_data():
         st.error(f"⚠️ 讀取資料庫發生錯誤: {e}")
         return pd.DataFrame()
 
-# 寫入資料 (新增)
+# 寫入資料
 def save_entry(new_entry):
     client = get_gsheet_client()
     if not client: return
@@ -93,7 +105,7 @@ def save_entry(new_entry):
     try:
         sheet = client.open(GSHEET_NAME).sheet1
         
-        # 檢查是否為空表，如果是，先寫入標題
+        # 檢查是否為空表 (透過 get_all_values 比較安全)
         if not sheet.get_all_values():
              headers = [
                 "日期", "週次", "班級", "評分項目", "檢查人員",
@@ -102,7 +114,6 @@ def save_entry(new_entry):
             ]
              sheet.append_row(headers)
 
-        # 整理要寫入的列 (必須依照順序轉成 list)
         row_values = [
             str(new_entry.get("日期", "")),
             str(new_entry.get("週次", "")),
@@ -129,46 +140,52 @@ def save_entry(new_entry):
     except Exception as e:
         st.error(f"⚠️ 寫入資料失敗: {e}")
 
-# 刪除資料 (覆蓋模式)
+# 刪除資料
 def delete_entry(indices_to_delete):
     client = get_gsheet_client()
     if not client: return
 
     try:
         sheet = client.open(GSHEET_NAME).sheet1
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
+        # 改用 safe 的讀取方式
+        data = sheet.get_all_values()
+        if not data: return
+
+        # 轉成 DataFrame
+        headers = data[0]
+        # 簡單防呆
+        safe_headers = [h if h.strip() else f"Unknown_{i}" for i, h in enumerate(headers)]
+        df = pd.DataFrame(data[1:], columns=safe_headers)
         
-        # 刪除指定 index 的資料
+        # 刪除資料
         df = df.drop(indices_to_delete)
         
-        # 寫回 Google Sheet
-        sheet.clear() # 清空
-        # 寫回標題
+        # 寫回
+        sheet.clear()
         sheet.append_row(df.columns.tolist())
-        # 寫回資料
         sheet.append_rows(df.values.tolist())
         
     except Exception as e:
         st.error(f"⚠️ 刪除資料失敗: {e}")
 
+# 批次刪除
 def delete_batch(start_date, end_date):
     client = get_gsheet_client()
     if not client: return 0
 
     try:
         sheet = client.open(GSHEET_NAME).sheet1
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
+        data = sheet.get_all_values()
+        if not data: return 0
         
-        # 轉換日期
+        headers = data[0]
+        safe_headers = [h if h.strip() else f"Unknown_{i}" for i, h in enumerate(headers)]
+        df = pd.DataFrame(data[1:], columns=safe_headers)
+        
         df["日期"] = pd.to_datetime(df["日期"]).dt.date
         mask = (df["日期"] >= start_date) & (df["日期"] <= end_date)
         
-        # 保留不刪除的
         df_remaining = df[~mask]
-        
-        # 為了寫回，要把日期轉回字串
         df_remaining["日期"] = df_remaining["日期"].astype(str)
 
         deleted_count = mask.sum()
@@ -194,36 +211,27 @@ def load_config():
         "smtp_email": "",
         "smtp_password": ""
     }
-
-    # 1. 優先從 Secrets 讀取 (Cloud 模式)
     if "system_config" in st.secrets:
-        # 使用 update 來覆蓋預設值，避免缺少 key 導致錯誤
         default_config.update(st.secrets["system_config"])
         return default_config
     
-    # 2. Fallback 到本地檔案 (開發用/暫存用)
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding='utf-8') as f:
                 return json.load(f)
-        except:
-            pass
-            
+        except: pass
     return default_config
 
 def save_config(new_config):
-    # 注意：無法動態寫入 secrets.toml
-    # 這裡寫入本地 JSON，但在 Cloud 上重啟會重置。
     with open(CONFIG_FILE, "w", encoding='utf-8') as f:
         json.dump(new_config, f, ensure_ascii=False)
 
 SYSTEM_CONFIG = load_config()
 
 # ==========================================
-# 3. 名單處理 (維持 CSV 讀取)
+# 3. 名單處理
 # ==========================================
 
-# --- A. 導師名單讀取 ---
 @st.cache_data
 def load_teacher_emails():
     email_dict = {}
@@ -253,7 +261,6 @@ def load_teacher_emails():
         except: pass
     return email_dict
 
-# --- B. 全校名單 ---
 @st.cache_data
 def load_roster_dict(csv_path=ROSTER_FILE):
     roster_dict = {}
@@ -288,7 +295,6 @@ def load_roster_dict(csv_path=ROSTER_FILE):
 
 ROSTER_DICT, ROSTER_DEBUG = load_roster_dict()
 
-# --- C. 晨掃輪值 ---
 def get_daily_duty(target_date, csv_path=DUTY_FILE):
     duty_list = []
     status = "init"
@@ -334,13 +340,11 @@ def get_daily_duty(target_date, csv_path=DUTY_FILE):
     else: status = "file_not_found"
     return duty_list, status, diag_info
 
-# --- D. 糾察隊名單 ---
 @st.cache_data
 def load_inspector_csv():
     inspectors = []
     debug_info = {"status": "init", "cols": [], "rows": 0}
     
-    # 如果檔案不存在，回傳預設管理員
     if not os.path.exists(INSPECTOR_DUTY_FILE):
         return [{"label": "衛生組長 (預設)", "allowed_roles": ["內掃檢查","外掃檢查","垃圾/回收檢查","晨間打掃"], "assigned_classes": [], "id_prefix": "9"}], debug_info
     
@@ -399,7 +403,6 @@ def load_inspector_csv():
 
 INSPECTOR_LIST, INSPECTOR_DEBUG = load_inspector_csv()
 
-# --- E. 假日與週次 ---
 def load_holidays():
     if os.path.exists(HOLIDAY_FILE): return pd.read_csv(HOLIDAY_FILE)
     return pd.DataFrame(columns=["日期", "原因"])
@@ -412,7 +415,6 @@ def get_school_week(date_obj):
     if week_num < 1: week_num = 0 
     return week_num, start_date
 
-# --- F. 班級產生 ---
 grades = ["一年級", "二年級", "三年級"]
 dept_config = {"商經科": 3, "應英科": 1, "資處科": 1, "家政科": 2, "服裝科": 2}
 class_labels = ["甲", "乙", "丙"] 
@@ -429,7 +431,6 @@ for dept, count in dept_config.items():
             all_classes.append(c_name)
             structured_classes.append({"grade": grade, "name": c_name})
 
-# --- H. 申訴資料庫 (注意：雲端會重置 CSV) ---
 def load_appeals():
     if os.path.exists(APPEALS_FILE):
         df = pd.read_csv(APPEALS_FILE)
@@ -456,7 +457,6 @@ def is_appeal_expired(record_date_str):
         return len(date_range) > 4 
     except: return True
 
-# --- I. 郵件發送 ---
 def send_email(to_email, subject, body):
     sender_email = SYSTEM_CONFIG["smtp_email"]
     sender_password = SYSTEM_CONFIG["smtp_password"]
@@ -537,7 +537,6 @@ if app_mode == "我是糾察隊 (評分)":
 
         # --- 介面分流 ---
         if role == "晨間打掃":
-            # v32.0 回歸 Table 顯示
             daily_duty_list, duty_status, _ = get_daily_duty(input_date)
             if duty_status == "success":
                 st.markdown(f"### 📋 今日 ({input_date}) 晨掃點名")
@@ -557,14 +556,12 @@ if app_mode == "我是糾察隊 (評分)":
             else: st.error(f"⚠️ 讀取輪值表失敗 ({duty_status})。")
 
         elif role == "垃圾/回收檢查":
-            # v32.0 垃圾 Table 版
             st.info(f"📅 第 {week_num} 週 (垃圾評分)")
             trash_category = st.radio("請選擇違規項目：", ["一般垃圾", "紙類", "網袋", "其他回收"], horizontal=True)
             
             st.markdown(f"### 📋 全校違規登記表 ({trash_category})")
             st.info("請在違規的班級後方打勾 (✅ = 違規扣1分)。")
             
-            # 建立 DataFrame: 班級, 無簽名, 無分類
             trash_data = [{"班級": cls, "無簽名": False, "無分類": False} for cls in all_classes]
             trash_df_init = pd.DataFrame(trash_data)
             
@@ -579,7 +576,6 @@ if app_mode == "我是糾察隊 (評分)":
             )
 
         else:
-            # 一般模式
             st.markdown("### 🏫 選擇班級")
             if assigned_classes:
                 selected_class = st.radio("請點選班級", assigned_classes)
@@ -633,7 +629,6 @@ if app_mode == "我是糾察隊 (評分)":
 
             if submitted:
                 img_path_str = ""
-                # 雲端版照片處理：暫存於記憶體或臨時資料夾，重啟後會消失
                 if uploaded_files:
                     saved_paths = []
                     timestamp = datetime.now().strftime("%H%M%S")
@@ -679,7 +674,7 @@ if app_mode == "我是糾察隊 (評分)":
                             if row["無分類"]: violations.append("無分類")
                             
                             if violations:
-                                score = len(violations) * 1 # 每個勾選扣1分
+                                score = len(violations) * 1 
                                 detail_str = "、".join(violations)
                                 entry = {
                                     "日期": input_date, "週次": week_num, "班級": row["班級"],
