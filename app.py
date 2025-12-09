@@ -460,15 +460,16 @@ elif app_mode == "衛生組後台":
                 else: st.info("請選擇週次")
             else: st.warning("無資料")
             
-        # 2. 寄送通知 (🟢 修復：解決按鈕失效問題)
+        # 2. 寄送通知 (升級版：顯示收件人預覽)
         with tab2:
             st.subheader("📧 每日違規通知")
+            st.info("💡 系統會自動比對 `teachers` 分頁的名單。寄出前請務必檢查下方列表。")
             target_date = st.date_input("選擇日期", today_tw)
             
-            # 使用 Session State 來記錄搜尋結果，避免按鈕重整後消失
+            # 使用 Session State 紀錄預覽資料
             if "mail_preview" not in st.session_state: st.session_state.mail_preview = None
 
-            if st.button("🔍 搜尋當日違規"):
+            if st.button("🔍 搜尋當日違規 (並預覽收件人)"):
                 df = load_main_data()
                 try:
                     df["日期Obj"] = pd.to_datetime(df["日期"], errors='coerce').dt.date
@@ -476,47 +477,83 @@ elif app_mode == "衛生組後台":
                 except: day_df = pd.DataFrame()
                 
                 if not day_df.empty:
+                    # 1. 計算扣分
                     stats = day_df.groupby("班級")[["內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數"]].sum().reset_index()
                     stats["當日總扣分"] = stats.iloc[:, 1:].sum(axis=1)
                     violation_classes = stats[stats["當日總扣分"] > 0]
                     
                     if not violation_classes.empty:
-                        st.session_state.mail_preview = violation_classes
-                        st.success(f"找到 {len(violation_classes)} 筆違規班級")
+                        # 2. 關鍵修改：將導師名單合併進來預覽
+                        preview_data = []
+                        for _, row in violation_classes.iterrows():
+                            cls_name = row["班級"]
+                            score = row["當日總扣分"]
+                            
+                            # 預設值 (找不到名單時顯示)
+                            t_name = "❌ 缺導師名單"
+                            t_email = "❌ 無法寄送"
+                            status = "異常"
+                            
+                            # 比對名單
+                            if cls_name in TEACHER_MAILS:
+                                t_info = TEACHER_MAILS[cls_name]
+                                t_name = t_info['name']
+                                t_email = t_info['email']
+                                status = "準備寄送"
+                            
+                            preview_data.append({
+                                "班級": cls_name,
+                                "當日總扣分": score,
+                                "導師姓名": t_name,
+                                "收件信箱": t_email,
+                                "狀態": status
+                            })
+                        
+                        # 存入 session state
+                        st.session_state.mail_preview = pd.DataFrame(preview_data)
+                        st.success(f"找到 {len(violation_classes)} 筆違規班級，請檢查下方名單：")
                     else:
                         st.session_state.mail_preview = None
-                        st.info("今日無違規")
+                        st.info("🎉 今日全校無違規！")
                 else:
                     st.session_state.mail_preview = None
-                    st.info("無當日資料")
+                    st.info("今日尚未有任何評分紀錄")
 
-            # 顯示預覽並提供寄送按鈕 (這段在搜尋按鈕之外)
+            # 顯示預覽表格與寄送按鈕
             if st.session_state.mail_preview is not None:
-                st.write("準備寄信給以下班級：")
-                st.dataframe(st.session_state.mail_preview)
+                st.write("### 📨 寄送預覽清單")
+                
+                # 顯示表格 (將沒有Email的標示出來)
+                preview_df = st.session_state.mail_preview
+                st.dataframe(preview_df)
+                
+                # 計算可以寄送的數量
+                valid_count = len(preview_df[preview_df["狀態"] == "準備寄送"])
+                total_count = len(preview_df)
+                
+                if valid_count < total_count:
+                    st.warning(f"⚠️ 注意：有 {total_count - valid_count} 個班級沒有設定導師 Email，將會跳過不寄送。")
+                
+                st.write(f"即將寄發 **{valid_count}** 封信件")
                 
                 if st.button("🚀 確認寄出信件"):
                     bar = st.progress(0)
-                    count = 0
-                    violation_classes = st.session_state.mail_preview
+                    success_count = 0
                     
-                    for idx, row in violation_classes.iterrows():
-                        cls_name = row["班級"]
-                        score = row["當日總扣分"]
+                    for idx, row in preview_df.iterrows():
+                        # 只寄送狀態正常的
+                        if row["狀態"] == "準備寄送":
+                            subject = f"衛生評分通知 ({target_date}) - {row['班級']}"
+                            content = f"{row['導師姓名']} 老師您好：\n\n貴班今日({target_date}) 衛生評分總扣分為：{row['當日總扣分']} 分。\n請協助督導，謝謝。\n\n衛生組 敬上"
+                            
+                            is_sent, msg = send_email(row["收件信箱"], subject, content)
+                            if is_sent: success_count += 1
                         
-                        if cls_name in TEACHER_MAILS:
-                            t_info = TEACHER_MAILS[cls_name]
-                            subject = f"衛生評分通知 ({target_date}) - {cls_name}"
-                            content = f"{t_info['name']} 老師您好：\n\n貴班今日({target_date}) 衛生評分總扣分為：{score} 分。\n請協助督導，謝謝。\n\n衛生組 敬上"
-                            success, msg = send_email(t_info['email'], subject, content)
-                            if success: count += 1
-                        else:
-                            st.warning(f"找不到 {cls_name} 的 Email")
-                        bar.progress((idx + 1) / len(violation_classes))
+                        # 更新進度條
+                        bar.progress((idx + 1) / total_count)
                     
-                    st.success(f"✅ 寄信完成！共成功寄出 {count} 封。")
-                    st.session_state.mail_preview = None # 清除狀態
-                    # st.rerun() # 不需要強制 rerun，讓使用者看到成功訊息
+                    st.success(f"✅ 寄送作業結束！成功寄出 {success_count} 封。")
+                    st.session_state.mail_preview = None # 寄完後清除預覽
 
         # 3. 資料刪除
         with tab3:
@@ -559,3 +596,4 @@ elif app_mode == "衛生組後台":
                 st.success("快取已清除")
     else:
         st.error("密碼錯誤")
+
