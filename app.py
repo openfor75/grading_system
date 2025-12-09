@@ -4,6 +4,7 @@ import os
 import json
 import shutil
 import smtplib
+import io # 用來處理 Excel 下載
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
@@ -26,6 +27,7 @@ APPEALS_FILE = "appeals.csv"
 INSPECTOR_DUTY_FILE = "糾察隊名單.csv" 
 TEACHER_MAIL_FILE = "導師名單.csv"
 
+# 確保資料夾存在
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 if not os.path.exists(BACKUP_DIR): os.makedirs(BACKUP_DIR)
 
@@ -34,13 +36,18 @@ if not os.path.exists(BACKUP_DIR): os.makedirs(BACKUP_DIR)
 # ==========================================
 
 def perform_daily_backup():
-    if not os.path.exists(SCORING_FILE): return
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    backup_filename = f"scoring_data_{today_str}.csv"
+    if not os.path.exists(SCORING_FILE): return "無資料檔可備份"
+    
+    # 產生帶有時間戳記的檔名 (例如: backups/scoring_data_2025-12-09_153000.csv)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    backup_filename = f"scoring_data_{timestamp}.csv"
     backup_path = os.path.join(BACKUP_DIR, backup_filename)
-    if not os.path.exists(backup_path):
-        try: shutil.copy(SCORING_FILE, backup_path)
-        except: pass
+    
+    try:
+        shutil.copy(SCORING_FILE, backup_path)
+        return f"✅ 備份成功！檔案位置：{backup_path}"
+    except Exception as e:
+        return f"❌ 備份失敗: {e}"
 
 def load_data():
     expected_columns = [
@@ -68,7 +75,12 @@ def load_data():
 
 def save_entry(new_entry):
     try:
-        perform_daily_backup()
+        # 每天第一次自動備份邏輯 (只檢查日期)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        daily_backup_path = os.path.join(BACKUP_DIR, f"scoring_data_{today_str}.csv")
+        if os.path.exists(SCORING_FILE) and not os.path.exists(daily_backup_path):
+            shutil.copy(SCORING_FILE, daily_backup_path)
+
         df = load_data()
         new_row = pd.DataFrame([new_entry])
         df = pd.concat([df, new_row], ignore_index=True)
@@ -78,7 +90,6 @@ def save_entry(new_entry):
 
 def delete_entry(indices_to_delete):
     try:
-        perform_daily_backup()
         df = load_data()
         df = df.drop(indices_to_delete)
         df.to_csv(SCORING_FILE, index=False, encoding='utf-8-sig')
@@ -87,7 +98,7 @@ def delete_entry(indices_to_delete):
 
 def delete_batch(start_date, end_date):
     try:
-        perform_daily_backup()
+        perform_daily_backup() # 批次刪除前強制備份
         df = load_data()
         if df.empty: return 0
         df["日期_dt"] = pd.to_datetime(df["日期"]).dt.date
@@ -162,7 +173,6 @@ def load_roster_dict(csv_path=ROSTER_FILE):
     return roster_dict, {}
 ROSTER_DICT, _ = load_roster_dict()
 
-# 修正：確保讀取地點
 def get_daily_duty(target_date, csv_path=DUTY_FILE):
     duty_list = []
     status = "init"
@@ -353,7 +363,7 @@ if app_mode == "我是糾察隊 (評分)":
         week_num, start_date = get_school_week(input_date)
         if str(input_date) in load_holidays()["日期"].values: st.warning(f"⚠️ 注意：{input_date} 是假日。")
 
-        # 讀取目前已有的資料 (用來顯示狀態)
+        # 讀取目前已有的資料
         df = load_data()
         today_records = df[df["日期"] == str(input_date)] if not df.empty else pd.DataFrame()
 
@@ -363,13 +373,10 @@ if app_mode == "我是糾察隊 (評分)":
             if duty_status == "success":
                 st.markdown(f"### 📋 今日 ({input_date}) 晨掃點名")
                 st.info("👇 請在 **「已完成打掃」** 欄位打勾。")
-                
-                # 檢查是否已評分過
                 already_graded = not today_records[today_records["評分項目"]=="晨間打掃"].empty
                 if already_graded: st.warning("⚠️ 注意：今日已有晨掃評分紀錄。")
 
                 with st.form("morning_form", clear_on_submit=True):
-                    # 這裡確認有讀取並顯示「掃地區域」
                     edited_morning_df = st.data_editor(
                         pd.DataFrame(daily_duty_list), 
                         column_config={
@@ -404,7 +411,6 @@ if app_mode == "我是糾察隊 (評分)":
             trash_category = st.radio("請選擇違規項目：", ["一般垃圾", "紙類", "網袋", "其他回收"], horizontal=True)
             st.markdown(f"### 📋 全校違規登記表 ({trash_category})")
             
-            # 檢查是否已評分過
             graded_classes = today_records[today_records["評分項目"]=="垃圾/回收檢查"]["班級"].unique()
             if len(graded_classes) > 0: st.caption(f"今日已登記違規班級數：{len(graded_classes)}")
 
@@ -583,6 +589,20 @@ elif app_mode == "衛生組後台":
                     rep = rep.sort_values(by="總成績", ascending=False)
                     
                     st.dataframe(rep.style.format("{:.0f}", subset=["總扣分", "總成績"]).background_gradient(subset=["總成績"], cmap="RdYlGn", vmin=60, vmax=90))
+                    
+                    # 📥 Excel 下載功能
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        rep.to_excel(writer, index=False, sheet_name='總成績')
+                        dg.to_excel(writer, index=False, sheet_name='每日統計')
+                        wdf.to_excel(writer, index=False, sheet_name='原始紀錄')
+                    
+                    st.download_button(
+                        label="📥 下載 Excel 報表",
+                        data=buffer.getvalue(),
+                        file_name=f"衛生糾察報表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
             else: st.warning("無資料")
             
         with tab2:
@@ -616,6 +636,11 @@ elif app_mode == "衛生組後台":
         with tab4:
             st.write("### 🛠️ 資料管理")
             
+            # 手動備份按鈕
+            if st.button("📦 立即手動備份"):
+                msg = perform_daily_backup()
+                st.success(msg)
+
             st.write("#### 🗑️ 單筆刪除")
             if not df.empty:
                 df_display = df.sort_values(by="登錄時間", ascending=False).reset_index()
@@ -641,6 +666,7 @@ elif app_mode == "衛生組後台":
             
             st.write("#### 🔐 密碼管理")
             c1, c2 = st.columns(2)
+            # 這裡加上了 type='password'
             n_admin = c1.text_input("新管理密碼", value=SYSTEM_CONFIG.get("admin_password", ""), type="password")
             n_team = c2.text_input("新糾察密碼", value=SYSTEM_CONFIG.get("team_password", ""), type="password")
             
