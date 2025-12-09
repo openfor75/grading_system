@@ -871,3 +871,20 @@ elif app_mode == "衛生組後台":
                 
 
     else: st.error("密碼錯誤")
+
+# --- 除錯工具 (請貼在 st.sidebar 下方) ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("🐛 除錯測試")
+if st.sidebar.button("測試寫入 Google Sheet"):
+    try:
+        sheet = get_sheet_connection()
+        if sheet:
+            st.sidebar.info("連線物件取得成功...")
+            # 測試寫入一行測試資料
+            test_data = [str(datetime.now()), "測試週", "測試班", "系統測試", "管理員", 0,0,0,0,0,0,0, "連線測試", "", "", "", "FALSE", ""]
+            sheet.append_row(test_data)
+            st.sidebar.success("✅ 寫入指令已送出！請檢查 Google Sheet 最後一行。")
+        else:
+            st.sidebar.error("❌ 無法取得 Sheet 連線物件")
+    except Exception as e:
+        st.sidebar.error(f"❌ 寫入失敗，錯誤訊息：\n{e}")
