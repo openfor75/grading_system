@@ -6,17 +6,16 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
-import gspread
-from google.oauth2.service_account import Credentials
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="衛生糾察評分系統", layout="wide")
+st.set_page_config(page_title="衛生糾察評分系統 (單機版)", layout="wide")
 
 # ==========================================
-# 0. 基礎設定
+# 0. 基礎設定與檔案管理
 # ==========================================
 
-GSHEET_NAME = "衛生糾察評分資料庫" 
+# 所有的資料都存成 CSV，不連線 Google
+SCORING_FILE = "scoring_data.csv"   # 主要評分資料
 IMG_DIR = "evidence_photos"
 CONFIG_FILE = "config.json"
 HOLIDAY_FILE = "holidays.csv"
@@ -29,165 +28,109 @@ TEACHER_MAIL_FILE = "導師名單.csv"
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 
 # ==========================================
-# 1. Google Sheets 連線 (移除 Cache 以確保穩定)
+# 1. 資料庫函式 (CSV 版本)
 # ==========================================
 
-# ⚠️ 修改：移除 @st.cache_resource，避免連線過期導致無法寫入
-def get_gsheet_client():
-    if "gcp_service_account" not in st.secrets:
-        st.error("⚠️ 未偵測到 Google 金鑰，請檢查 Secrets 設定！")
-        return None
-    try:
-        scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
-        client = gspread.authorize(creds)
-        return client
-    except Exception as e:
-        st.error(f"⚠️ Google 連線失敗: {e}")
-        return None
-
-# 讀取資料 (強制轉數字版)
+# 讀取評分資料
 def load_data():
-    client = get_gsheet_client()
-    if not client: return pd.DataFrame()
+    # 定義標準欄位
+    expected_columns = [
+        "日期", "週次", "班級", "評分項目", "檢查人員",
+        "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數", 
+        "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
+    ]
 
-    try:
-        sheet = client.open(GSHEET_NAME).sheet1
-        data = sheet.get_all_values()
-        
-        expected_columns = [
-            "日期", "週次", "班級", "評分項目", "檢查人員",
-            "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數", 
-            "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
-        ]
-
-        if not data: return pd.DataFrame(columns=expected_columns)
-            
-        rows = data[1:]
-        if not rows: return pd.DataFrame(columns=expected_columns)
-
-        # 1. 統一寬度
-        n_cols = len(expected_columns)
-        cleaned_rows = []
-        for row in rows:
-            if len(row) > n_cols: cleaned_rows.append(row[:n_cols])
-            elif len(row) < n_cols: cleaned_rows.append(row + [""] * (n_cols - len(row)))
-            else: cleaned_rows.append(row)
-        
-        df = pd.DataFrame(cleaned_rows, columns=expected_columns)
-
-        # 2. 強制將數字欄位轉為數字 (最關鍵的一步)
-        numeric_cols = ["內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數"]
-        for col in numeric_cols:
-            if col in df.columns:
-                # 先轉成數字(無法轉的變NaN)，NaN補0，最後轉整數
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-
-        # 3. 處理布林值
-        if "修正" in df.columns:
-            df["修正"] = df["修正"].apply(lambda x: True if str(x).upper() == "TRUE" else False)
-            
-        return df
-
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"❌ 找不到 Google 試算表：**{GSHEET_NAME}**。")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"⚠️ 讀取錯誤: {e}")
-        return pd.DataFrame()
-
-# 寫入資料
-def save_entry(new_entry):
-    client = get_gsheet_client()
-    if not client: return
-
-    try:
-        sheet = client.open(GSHEET_NAME).sheet1
-        # 全部轉字串再存，確保格式最安全
-        row_values = [
-            str(new_entry.get("日期", "")),
-            str(new_entry.get("週次", "")),
-            str(new_entry.get("班級", "")),
-            str(new_entry.get("評分項目", "")),
-            str(new_entry.get("檢查人員", "")),
-            str(new_entry.get("內掃原始分", 0)),
-            str(new_entry.get("外掃原始分", 0)),
-            str(new_entry.get("垃圾原始分", 0)),
-            str(new_entry.get("垃圾內掃原始分", 0)),
-            str(new_entry.get("垃圾外掃原始分", 0)),
-            str(new_entry.get("晨間打掃原始分", 0)),
-            str(new_entry.get("手機人數", 0)),
-            str(new_entry.get("備註", "")),
-            str(new_entry.get("違規細項", "")),
-            str(new_entry.get("照片路徑", "")),
-            str(new_entry.get("登錄時間", "")),
-            str(new_entry.get("修正", False)),
-            str(new_entry.get("晨掃未到者", ""))
-        ]
-        
+    if os.path.exists(SCORING_FILE):
         try:
-            if not sheet.get_all_values():
-                 sheet.append_row([
-                    "日期", "週次", "班級", "評分項目", "檢查人員",
-                    "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數", 
-                    "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
-                ])
-        except: pass
+            # 嘗試讀取 CSV
+            df = pd.read_csv(SCORING_FILE)
+            
+            # 確保欄位都存在 (防呆)
+            for col in expected_columns:
+                if col not in df.columns:
+                    df[col] = "" # 補上缺少的欄位
+            
+            # 強制將數字欄位轉為數字 (避免計算錯誤)
+            numeric_cols = ["內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數"]
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
 
-        sheet.append_row(row_values)
+            # 強制轉換布林值
+            if "修正" in df.columns:
+                df["修正"] = df["修正"].astype(str).apply(lambda x: True if x.upper() == "TRUE" else False)
+                
+            return df[expected_columns] # 只回傳標準欄位
+
+        except Exception as e:
+            st.error(f"讀取 CSV 失敗: {e}")
+            return pd.DataFrame(columns=expected_columns)
+    else:
+        # 如果檔案不存在，回傳空表
+        return pd.DataFrame(columns=expected_columns)
+
+# 寫入資料 (新增)
+def save_entry(new_entry):
+    try:
+        df = load_data()
+        new_row = pd.DataFrame([new_entry])
+        
+        # 合併新資料
+        df = pd.concat([df, new_row], ignore_index=True)
+        
+        # 寫入 CSV
+        df.to_csv(SCORING_FILE, index=False, encoding='utf-8-sig')
         
     except Exception as e:
-        st.error(f"⚠️ 寫入失敗: {e}")
+        st.error(f"寫入資料失敗: {e}")
 
-# 刪除資料
+# 刪除資料 (根據 index)
 def delete_entry(indices_to_delete):
-    client = get_gsheet_client()
-    if not client: return
     try:
-        sheet = client.open(GSHEET_NAME).sheet1
-        data = sheet.get_all_values()
-        if not data: return
-        headers = data[0]
-        safe_headers = [h if h.strip() else f"Unknown_{i}" for i, h in enumerate(headers)]
-        df = pd.DataFrame(data[1:], columns=safe_headers)
+        df = load_data()
+        # 刪除指定 index
         df = df.drop(indices_to_delete)
-        sheet.clear()
-        sheet.append_row(df.columns.tolist())
-        sheet.append_rows(df.values.tolist())
-    except Exception as e: st.error(f"⚠️ 刪除失敗: {e}")
+        # 寫回 CSV
+        df.to_csv(SCORING_FILE, index=False, encoding='utf-8-sig')
+    except Exception as e:
+        st.error(f"刪除資料失敗: {e}")
 
+# 批次刪除
 def delete_batch(start_date, end_date):
-    client = get_gsheet_client()
-    if not client: return 0
     try:
-        sheet = client.open(GSHEET_NAME).sheet1
-        data = sheet.get_all_values()
-        if not data: return 0
-        headers = data[0]
-        safe_headers = [h if h.strip() else f"Unknown_{i}" for i, h in enumerate(headers)]
-        df = pd.DataFrame(data[1:], columns=safe_headers)
-        df["日期"] = pd.to_datetime(df["日期"]).dt.date
-        mask = (df["日期"] >= start_date) & (df["日期"] <= end_date)
-        df_remaining = df[~mask]
-        df_remaining["日期"] = df_remaining["日期"].astype(str)
+        df = load_data()
+        if df.empty: return 0
+        
+        df["日期_dt"] = pd.to_datetime(df["日期"]).dt.date
+        mask = (df["日期_dt"] >= start_date) & (df["日期_dt"] <= end_date)
+        
         deleted_count = mask.sum()
-        sheet.clear()
-        sheet.append_row(df_remaining.columns.tolist())
-        sheet.append_rows(df_remaining.values.tolist())
+        df_remaining = df[~mask].drop(columns=["日期_dt"])
+        
+        df_remaining.to_csv(SCORING_FILE, index=False, encoding='utf-8-sig')
         return deleted_count
     except Exception as e:
-        st.error(f"⚠️ 批次刪除失敗: {e}")
+        st.error(f"批次刪除失敗: {e}")
         return 0
 
 # ==========================================
-# 2. 設定檔與密碼管理
+# 2. 設定檔與密碼管理 (本地 JSON)
 # ==========================================
 def load_config():
     default_config = { "semester_start": "2025-08-25", "admin_password": "1234", "team_password": "0000", "smtp_email": "", "smtp_password": "" }
+    # 優先讀取 secrets (如果有設的話)，沒有就讀本地 json
     if "system_config" in st.secrets: default_config.update(st.secrets["system_config"])
+    elif os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except: pass
     return default_config
+
 def save_config(new_config):
-    with open(CONFIG_FILE, "w", encoding='utf-8') as f: json.dump(new_config, f, ensure_ascii=False)
+    with open(CONFIG_FILE, "w", encoding='utf-8') as f:
+        json.dump(new_config, f, ensure_ascii=False)
+
 SYSTEM_CONFIG = load_config()
 
 # ==========================================
@@ -379,7 +322,7 @@ st.sidebar.title("🏫 功能選單")
 app_mode = st.sidebar.radio("請選擇模式", ["我是糾察隊 (評分)", "我是班上衛生股長", "衛生組後台"])
 
 if app_mode == "我是糾察隊 (評分)":
-    st.title("📝 衛生糾察評分系統 (雲端版)")
+    st.title("📝 衛生糾察評分系統 (單機版)")
     if "team_logged_in" not in st.session_state: st.session_state["team_logged_in"] = False
     if not st.session_state["team_logged_in"]:
         with st.expander("🔐 身份驗證", expanded=True):
@@ -582,10 +525,10 @@ elif app_mode == "衛生組後台":
                 sw = st.multiselect("週次", wks, default=[wks[-1]])
                 if sw:
                     wdf = df[df["週次"].isin(sw)].copy()
-                    # ⚠️ 這裡就是之前報錯的地方，現在我們有 load_data 的強制轉型保護，這裡就安全了！
-                    # 但為了雙重保險，我們這裡再轉一次，確保萬無一失
                     num_cols = ["內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數"]
-                    for c in num_cols: wdf[c] = pd.to_numeric(wdf[c], errors='coerce').fillna(0).astype(int)
+                    for c in num_cols: 
+                        if c in wdf.columns:
+                            wdf[c] = pd.to_numeric(wdf[c], errors='coerce').fillna(0).astype(int)
 
                     dg = wdf.groupby(["日期", "班級"]).agg({
                         "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum", "垃圾內掃原始分": "sum", "垃圾外掃原始分": "sum",
@@ -648,4 +591,3 @@ elif app_mode == "衛生組後台":
                 save_config(SYSTEM_CONFIG); st.success("已更新")
             st.file_uploader("上傳全校名單", key="u1"); st.file_uploader("上傳導師名單", key="u2"); st.file_uploader("上傳糾察名單", key="u3"); st.file_uploader("上傳輪值表", key="u4")
     else: st.error("密碼錯誤")
-```
