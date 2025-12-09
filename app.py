@@ -18,20 +18,27 @@ from oauth2client.service_account import ServiceAccountCredentials
 st.set_page_config(page_title="衛生糾察評分系統 (雲端連線版)", layout="wide")
 
 # ==========================================
-# 0. 基礎設定與檔案管理
+# 0. 基礎設定與全域變數
 # ==========================================
 
-# 修改：Google Sheet 網址與設定
+# Google Sheet 網址
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1nrX4v-K0xr-lygiBXrBwp4eWiNi9LY0-LIr-K1vBHDw/edit#gid=0"
+
+# 定義標準欄位 (確保讀寫一致)
+EXPECTED_COLUMNS = [
+    "日期", "週次", "班級", "評分項目", "檢查人員",
+    "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數",
+    "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
+]
 
 BACKUP_DIR = "backups"
 IMG_DIR = "evidence_photos"
 CONFIG_FILE = "config.json"
 HOLIDAY_FILE = "holidays.csv"
-ROSTER_FILE = "全校名單.csv" 
-DUTY_FILE = "晨掃輪值.csv" 
+ROSTER_FILE = "全校名單.csv"
+DUTY_FILE = "晨掃輪值.csv"
 APPEALS_FILE = "appeals.csv"
-INSPECTOR_DUTY_FILE = "糾察隊名單.csv" 
+INSPECTOR_DUTY_FILE = "糾察隊名單.csv"
 TEACHER_MAIL_FILE = "導師名單.csv"
 
 # 確保資料夾存在
@@ -48,25 +55,23 @@ def get_sheet_connection():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     try:
         # 從 st.secrets 讀取憑證
+        if "gcp_service_account" not in st.secrets:
+            st.error("❌ 找不到 secrets.toml 設定，請檢查 Streamlit Secrets。")
+            return None
+            
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         sheet = client.open_by_url(SHEET_URL).sheet1
         return sheet
     except Exception as e:
-        st.error(f"❌ 無法連線至 Google Sheets，請檢查 secrets.toml 設定或共用權限。\n錯誤訊息: {e}")
+        st.error(f"❌ 無法連線至 Google Sheets，請檢查權限或網路。\n錯誤訊息: {e}")
         return None
 
 def load_data():
     """從 Google Sheets 讀取資料"""
-    expected_columns = [
-        "日期", "週次", "班級", "評分項目", "檢查人員",
-        "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數", 
-        "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
-    ]
-    
     sheet = get_sheet_connection()
-    if not sheet: return pd.DataFrame(columns=expected_columns)
+    if not sheet: return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
     try:
         data = sheet.get_all_records()
@@ -74,10 +79,10 @@ def load_data():
 
         # 如果 Sheet 是空的，回傳空 DataFrame 但要有欄位
         if df.empty:
-            return pd.DataFrame(columns=expected_columns)
+            return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
         # 補齊缺失欄位
-        for col in expected_columns:
+        for col in EXPECTED_COLUMNS:
             if col not in df.columns: df[col] = ""
             
         # 處理數值欄位 (避免 Sheet 空白讀成字串)
@@ -90,40 +95,44 @@ def load_data():
         if "修正" in df.columns:
             df["修正"] = df["修正"].astype(str).apply(lambda x: True if x.upper() == "TRUE" else False)
             
-        return df[expected_columns]
+        return df[EXPECTED_COLUMNS]
         
     except Exception as e:
         st.error(f"讀取資料失敗: {e}")
-        return pd.DataFrame(columns=expected_columns)
+        return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
 def save_entry(new_entry):
     """將單筆資料寫入 Google Sheets (Append)"""
     try:
         sheet = get_sheet_connection()
-        if not sheet: return
+        if not sheet: 
+            st.error("❌ 無法連線，資料未儲存。")
+            return
 
         # 確保 Sheet 有標題列 (如果是全空的)
         if not sheet.get_all_values():
-            expected_columns = [
-                "日期", "週次", "班級", "評分項目", "檢查人員",
-                "內掃原始分", "外掃原始分", "垃圾原始分", "垃圾內掃原始分", "垃圾外掃原始分", "晨間打掃原始分", "手機人數", 
-                "備註", "違規細項", "照片路徑", "登錄時間", "修正", "晨掃未到者"
-            ]
-            sheet.append_row(expected_columns)
+            sheet.append_row(EXPECTED_COLUMNS)
 
-        # 準備要寫入的資料列 (依照標題順序)
-        df_cols = load_data().columns.tolist()
+        # 準備要寫入的資料列 (直接依照 EXPECTED_COLUMNS 順序)
         row_values = []
-        for col in df_cols:
+        for col in EXPECTED_COLUMNS:
             val = new_entry.get(col, "")
-            # 將 True/False 轉為字串，避免 JSON 錯誤
-            if isinstance(val, bool): val = str(val).upper()
+            
+            # 特殊處理：日期轉字串
+            if col == "日期" and val:
+                val = str(val)
+                
+            # 特殊處理：布林值轉大寫字串
+            if isinstance(val, bool): 
+                val = str(val).upper()
+                
             row_values.append(val)
         
         sheet.append_row(row_values)
+        # 不要在這裡 rerun，讓主程式控制
         
     except Exception as e:
-        st.error(f"寫入資料失敗: {e}")
+        st.error(f"❌ 寫入資料失敗: {e}")
 
 def delete_entry(indices_to_delete):
     """刪除資料 (採用讀取全部 -> 刪除 -> 全覆寫的方式)"""
@@ -134,15 +143,17 @@ def delete_entry(indices_to_delete):
         sheet = get_sheet_connection()
         if sheet:
             sheet.clear() # 清空整張表
-            # 寫回標題與資料
-            # 將 DataFrame 轉為 List of Lists
+            
+            # 準備標題與資料
             header = df.columns.tolist()
             # 處理布林值轉字串
             if "修正" in df.columns:
                 df["修正"] = df["修正"].apply(lambda x: "TRUE" if x else "FALSE")
             
+            # 將 NaN 轉為空字串，避免 JSON 錯誤
+            df = df.fillna("")
+            
             data = df.values.tolist()
-            # 一次寫入 (比逐行寫快)
             sheet.update(range_name='A1', values=[header] + data)
             st.success("刪除成功並已同步至雲端！")
             
@@ -170,6 +181,8 @@ def delete_batch(start_date, end_date):
             header = df_remaining.columns.tolist()
             if "修正" in df_remaining.columns:
                 df_remaining["修正"] = df_remaining["修正"].apply(lambda x: "TRUE" if x else "FALSE")
+            
+            df_remaining = df_remaining.fillna("")
             data = df_remaining.values.tolist()
             sheet.update(range_name='A1', values=[header] + data)
             return deleted_count
@@ -191,7 +204,6 @@ def perform_daily_backup():
     except Exception as e:
         return f"❌ 備份失敗: {e}"
 
-# 備份還原功能 (暫時僅支援從本地 CSV 還原到雲端，需謹慎使用)
 def restore_backup(backup_filename):
     backup_path = os.path.join(BACKUP_DIR, backup_filename)
     if os.path.exists(backup_path):
@@ -203,6 +215,7 @@ def restore_backup(backup_filename):
             if sheet:
                 sheet.clear()
                 header = backup_df.columns.tolist()
+                backup_df = backup_df.fillna("")
                 data = backup_df.values.tolist()
                 sheet.update(range_name='A1', values=[header] + data)
                 return True, "✅ 已將備份檔覆寫回 Google Sheets！"
@@ -210,7 +223,6 @@ def restore_backup(backup_filename):
             return False, f"❌ 還原失敗: {e}"
     return False, "❌ 找不到備份檔"
 
-# 歷史資料匿名化 (修改為操作雲端資料)
 def anonymize_history():
     df = load_data()
     if df.empty: return "無資料"
@@ -244,6 +256,8 @@ def anonymize_history():
             header = df.columns.tolist()
             if "修正" in df.columns:
                 df["修正"] = df["修正"].apply(lambda x: "TRUE" if x else "FALSE")
+            
+            df = df.fillna("")
             data = df.values.tolist()
             sheet.update(range_name='A1', values=[header] + data)
         return f"✅ 已成功移除 {count} 筆歷史紀錄中的姓名！"
@@ -268,7 +282,7 @@ def save_config(new_config):
 SYSTEM_CONFIG = load_config()
 
 # ==========================================
-# 3. CSV 讀取 (名單維持本地讀取，減少 API 呼叫)
+# 3. CSV 讀取 (名單維持本地讀取)
 # ==========================================
 @st.cache_data
 def load_teacher_emails():
@@ -390,6 +404,7 @@ INSPECTOR_LIST, _ = load_inspector_csv()
 def load_holidays():
     if os.path.exists(HOLIDAY_FILE): return pd.read_csv(HOLIDAY_FILE)
     return pd.DataFrame(columns=["日期", "原因"])
+
 def get_school_week(date_obj):
     start_date = datetime.strptime(SYSTEM_CONFIG["semester_start"], "%Y-%m-%d").date()
     if isinstance(date_obj, datetime): date_obj = date_obj.date()
@@ -509,6 +524,7 @@ if app_mode == "我是糾察隊 (評分)":
         week_num, start_date = get_school_week(input_date)
         if str(input_date) in load_holidays()["日期"].values: st.warning(f"⚠️ 注意：{input_date} 是假日。")
 
+        # 這裡的縮排與變數是正確的
         df = load_data()
         today_records = df[df["日期"] == str(input_date)]
 
@@ -598,6 +614,7 @@ if app_mode == "我是糾察隊 (評分)":
                 in_score = 0; out_score = 0; trash_score = 0; morning_score = 0; phone_count = 0; note = ""
                 is_perfect = False
                 
+                # 這裡的邏輯與縮排都已校正
                 if role == "內掃檢查":
                     check_status = st.radio("檢查結果", ["❌ 發現違規", "✨ 很乾淨 (不扣分)"], horizontal=True)
                     if check_status == "❌ 發現違規":
@@ -632,7 +649,6 @@ if app_mode == "我是糾察隊 (評分)":
                             with open(full_path, "wb") as f: f.write(u_file.getbuffer())
                             saved_paths.append(full_path)
                         img_path_str = ";".join(saved_paths)
-                        # 注意：目前照片仍儲存在本機，若要跨裝置看圖，需串接 Imgur
 
                     base_entry = {
                         "日期": input_date, "週次": week_num, "檢查人員": inspector_name,
@@ -643,6 +659,8 @@ if app_mode == "我是糾察隊 (評分)":
                     entry = {**base_entry, "班級": selected_class, "評分項目": role, "內掃原始分": in_score, "外掃原始分": out_score,
                              "垃圾原始分": trash_score, "晨間打掃原始分": morning_score, "手機人數": phone_count,
                              "備註": final_note, "照片路徑": img_path_str}
+                    
+                    # 關鍵：呼叫儲存
                     save_entry(entry)
                     st.toast(f"✅ 已儲存至雲端：{selected_class} - {role}", icon="🎉")
                     st.rerun()
@@ -888,4 +906,3 @@ if st.sidebar.button("測試寫入 Google Sheet"):
             st.sidebar.error("❌ 無法取得 Sheet 連線物件")
     except Exception as e:
         st.sidebar.error(f"❌ 寫入失敗，錯誤訊息：\n{e}")
-
