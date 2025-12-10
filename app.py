@@ -653,7 +653,7 @@ elif app_mode == "衛生組後台":
                 else: st.info("請選擇週次")
             else: st.warning("無資料")
             
-        # 2. 寄送通知
+# 2. 寄送通知
         with tab2:
             st.subheader("📧 每日違規通知")
             target_date = st.date_input("選擇日期", today_tw)
@@ -731,9 +731,83 @@ elif app_mode == "衛生組後台":
                     # 晨掃表格
                     edited_df = st.data_editor(pd.DataFrame(duty_list), 
                                                column_config={"已完成打掃": st.column_config.CheckboxColumn(default=False), 
-                                                              "學號": st.column_config.TextColumn("學號")}) # 修正: 補齊 column_config 的定義，防止錯誤
-                                                              
-                    # ----------------------------------------------------
-                    # 修正點：程式碼到這裡被截斷，但這裡通常是表單提交邏輯
-                    # 這裡無法修復，因為程式碼不完整
-                    # ----------------------------------------------------
+                                                              "學號": st.column_config.TextColumn(disabled=True), 
+                                                              "掃地區域": st.column_config.TextColumn(disabled=True)}, 
+                                               hide_index=True, use_container_width=True)
+
+                    if st.form_submit_button("送出晨掃紀錄"):
+                        base = {"日期": input_date, "週次": week_num, "檢查人員": inspector_name, 
+                                "登錄時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), "修正": False}
+                        absent = edited_df[edited_df["已完成打掃"] == False]
+
+                        if absent.empty:
+                            st.success("🎉 全員到齊！")
+                        else:
+                            count = 0
+                            for _, r in absent.iterrows():
+                                tid = clean_id(r["學號"])
+                                tloc = r["掃地區域"]
+                                stu_class = ROSTER_DICT.get(tid, f"查無({tid})")
+                                # 儲存紀錄 (使用組長身份、設定好的扣分)
+                                save_entry({**base, "班級": stu_class, "評分項目": "晨間打掃", 
+                                            "晨間打掃原始分": morning_score, "備註": f"晨掃未到 ({tloc}) - 學號:{tid}", 
+                                            "晨掃未到者": tid})
+                                count += 1
+                            st.error(f"⚠️ 已登記 {count} 人未到，共扣 {count * morning_score} 分")
+                        st.rerun()
+
+            elif status == "no_data": st.warning("無輪值資料")
+            else: st.error("讀取失敗")
+            
+            
+        # 4. 名單管理 (原來的 tab5)
+        with tab4:
+            st.subheader("📄 名單管理")
+            
+            col_list_1, col_list_2 = st.columns(2)
+            
+            with col_list_1:
+                st.markdown("##### 糾察隊名單 (inspectors)")
+                st.info("請在 Google Sheets 編輯此表，這裡僅顯示預覽。")
+                df_inspectors = pd.DataFrame(load_inspector_list())
+                st.dataframe(df_inspectors.drop(columns=["allowed_roles", "id_prefix"]), hide_index=True)
+                
+            with col_list_2:
+                st.markdown("##### 導師信箱名單 (teachers)")
+                st.info("請在 Google Sheets 編輯此表，這裡僅顯示預覽。")
+                st.dataframe(pd.DataFrame(TEACHER_MAILS).T, use_container_width=True)
+                
+            st.markdown("---")
+            st.subheader("🗓️ 學期設定")
+            st.info("設定學期開始日期，影響週次計算。")
+            
+            semester_start = st.date_input("學期開始日 (yyyy-mm-dd)", datetime.strptime(SYSTEM_CONFIG["semester_start"], "%Y-%m-%d").date())
+            
+            if st.button("💾 儲存學期設定"):
+                if save_setting("semester_start", str(semester_start)):
+                    st.success("✅ 學期設定儲存成功！")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error("❌ 儲存失敗。")
+
+
+        # 5. 申訴管理 (原來的 tab6)
+        with tab5:
+            st.subheader("📣 申訴管理")
+            appeals_df = load_appeals()
+            
+            if appeals_df.empty:
+                st.info("目前無申訴紀錄。")
+            else:
+                appeals_df = appeals_df.sort_values("登錄時間", ascending=False)
+                st.dataframe(appeals_df, use_container_width=True)
+                st.info("請在 Google Sheets 處理並更新 '處理狀態' 欄位。")
+                
+                # 下載申訴報表
+                csv = appeals_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥下載申訴報表(CSV)", csv, f"appeal_report_{today_tw}.csv")
+                
+    else:
+        st.error("❌ 密碼錯誤，請重新輸入。")
+
