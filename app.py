@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import smtplib
 import time
+import random
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
@@ -164,7 +165,7 @@ def clean_id(val):
 # 2. 資料讀取與寫入
 # ==========================================
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=3600)
 def load_main_data():
     ws = get_worksheet(SHEET_TABS["main"])
     if not ws: return pd.DataFrame(columns=EXPECTED_COLUMNS)
@@ -256,7 +257,7 @@ def update_appeal_status(record_time, new_status):
         st.error(f"更新失敗: {e}")
         return False
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=3600)
 def load_appeals():
     ws = get_worksheet(SHEET_TABS["appeals"])
     if not ws: return pd.DataFrame(columns=APPEAL_COLUMNS)
@@ -335,7 +336,7 @@ def load_inspector_list():
         return inspectors if inspectors else default
     except: return default
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=3600)
 def get_daily_duty(target_date):
     ws = get_worksheet(SHEET_TABS["duty"])
     if not ws: return [], "error"
@@ -924,3 +925,4 @@ elif app_mode == "衛生組後台":
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
+
