@@ -84,11 +84,10 @@ def get_drive_service():
         return None
 
 def upload_to_drive(file_obj, filename):
-    """將檔案上傳到 Google Drive (修正 Broken pipe 版)"""
+    """將檔案上傳到 Google Drive (支援共用雲端硬碟 + 斷點續傳)"""
     service = get_drive_service()
     if not service: return "上傳失敗(無連線)"
     
-    # 請在 secrets 中設定 drive_folder_id
     folder_id = st.secrets.get("system_config", {}).get("drive_folder_id", None)
     
     file_metadata = {'name': filename}
@@ -96,31 +95,18 @@ def upload_to_drive(file_obj, filename):
         file_metadata['parents'] = [folder_id]
     
     try:
-        # 修正 1: 確保檔案指標在開頭 (關鍵！)
-        # 因為 Streamlit 上傳後可能已經被讀取過一次，必須歸零才能再次上傳
         file_obj.seek(0)
-        
-        # 修正 2: 開啟 resumable=True (斷點續傳模式)
-        # 這能建立更穩定的上傳通道，解決 Broken pipe
-        media = MediaIoBaseUpload(
-            file_obj, 
-            mimetype=file_obj.type,
-            resumable=True 
-        )
-        
+        media = MediaIoBaseUpload(file_obj, mimetype=file_obj.type, resumable=True)
         file = service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id, webViewLink, thumbnailLink',
-            supportsAllDrives=True  # 支援共用雲端硬碟
+            supportsAllDrives=True
         ).execute()
-        
-        # 回傳 webViewLink
         return file.get('webViewLink')
     except Exception as e:
-        # 印出錯誤到後台 logs 以便除錯
         print(f"Drive Upload Error: {e}")
-        st.error(f"上傳 Drive 發生錯誤: {e}")
+        st.error(f"上傳失敗: {e}")
         return "上傳失敗"
 
 def extract_drive_file_id(url):
@@ -175,7 +161,7 @@ def clean_id(val):
         return str(val).strip()
 
 # ==========================================
-# 2. 資料讀取與寫入 (含更新狀態函式)
+# 2. 資料讀取與寫入
 # ==========================================
 
 @st.cache_data(ttl=60)
@@ -237,7 +223,6 @@ def save_appeal(entry):
     ws = get_worksheet(SHEET_TABS["appeals"])
     if not ws: st.error("申訴系統連線失敗"); return
     
-    # 確保標題列存在
     try:
         existing_data = ws.get_all_values()
         if not existing_data or existing_data[0] != APPEAL_COLUMNS:
@@ -259,13 +244,11 @@ def save_appeal(entry):
     except: return False
 
 def update_appeal_status(record_time, new_status):
-    """根據登錄時間找到該筆申訴，並更新狀態 (修復 NameError 關鍵)"""
+    """根據登錄時間找到該筆申訴，並更新狀態"""
     ws = get_worksheet(SHEET_TABS["appeals"])
     if not ws: return False
     try:
-        # 在 '登錄時間' (第9欄) 尋找對應的 timestamp
         cell = ws.find(record_time) 
-        # 更新該列的 '處理狀態' (第8欄)
         ws.update_cell(cell.row, 8, new_status)
         st.cache_data.clear() 
         return True
@@ -611,13 +594,9 @@ elif app_mode == "我是班上衛生股長":
                     st.write(f"📝 說明: {r['備註']}")
                     st.caption(f"檢查人員: {r['檢查人員']}")
                     
-                    # --- 修正：預覽照片 (優化版) ---
                     if r['照片路徑']:
                         st.markdown("##### 📸 佐證照片")
-                        # 過濾掉空字串
                         links = [l for l in str(r['照片路徑']).split(";") if l.strip()]
-                        
-                        # 顯示圖片迴圈
                         if links:
                             cols = st.columns(len(links))
                             for i, link in enumerate(links):
@@ -625,7 +604,6 @@ elif app_mode == "我是班上衛生股長":
                                     file_id = extract_drive_file_id(link)
                                     if file_id:
                                         img_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w1000"
-                                        # 確保有足夠的 column
                                         col = cols[i] if i < len(cols) else st
                                         with col:
                                             try:
@@ -875,7 +853,7 @@ elif app_mode == "衛生組後台":
             if appeals_df.empty:
                 st.info("目前無申訴紀錄。")
             else:
-                st.markdown("### 📋 申訴紀錄一覽")
+                st.markdown("### 📋 申訴紀錄一覽 (所有歷史案件)")
                 sorted_df = appeals_df.sort_values("登錄時間", ascending=False)
                 
                 st.dataframe(
@@ -889,38 +867,56 @@ elif app_mode == "衛生組後台":
                 
                 st.markdown("---")
                 
-                # --- 案件審核區 ---
-                st.markdown("### ⚖️ 案件審核區")
+                # --- 案件審核區 (卡片式) ---
+                st.markdown("### ⚖️ 案件審核區 (待處理案件)")
+                
+                # 篩選待處理
                 pending_cases = sorted_df[sorted_df["處理狀態"] == "待處理"]
                 
-                if not pending_cases.empty:
-                    pending_cases["選項標籤"] = pending_cases.apply(
-                        lambda x: f"【{x['班級']}】{x['違規項目']} (理由: {x['申訴理由'][:10]}...)", axis=1
-                    )
-                    
-                    target_case_label = st.selectbox("請選擇要處理的案件：", pending_cases["選項標籤"])
-                    target_row = pending_cases[pending_cases["選項標籤"] == target_case_label].iloc[0]
-                    target_id = target_row["登錄時間"]
-                    
-                    st.info(f"正在審核：{target_case_label}")
-                    
-                    col_pass, col_reject = st.columns(2)
-                    
-                    with col_pass:
-                        if st.button("✅ 核可 (撤銷扣分)", type="primary", use_container_width=True):
-                            if update_appeal_status(target_id, "申訴成功(已撤銷)"):
-                                st.success("已更新為：申訴成功")
-                                time.sleep(1)
-                                st.rerun()
-                    
-                    with col_reject:
-                        if st.button("❌ 駁回 (維持扣分)", type="secondary", use_container_width=True):
-                            if update_appeal_status(target_id, "申訴駁回(維持扣分)"):
-                                st.error("已更新為：申訴駁回")
-                                time.sleep(1)
-                                st.rerun()
-                else:
+                if pending_cases.empty:
                     st.success("🎉 目前沒有待處理的申訴案件！")
+                else:
+                    st.write(f"共 {len(pending_cases)} 件待審核")
+                    
+                    # 迴圈顯示每一案
+                    for idx, row in pending_cases.iterrows():
+                        with st.container(border=True):
+                            c1, c2 = st.columns([3, 1])
+                            
+                            # 左側：文字資訊
+                            with c1:
+                                st.markdown(f"#### 【{row['班級']}】 {row['違規項目']}")
+                                st.caption(f"違規日期: {row['違規日期']} | 扣分: {row['原始扣分']}")
+                                st.text_area("申訴理由", row['申訴理由'], disabled=True, height=80, key=f"reason_{idx}")
+                            
+                            # 右側：照片顯示
+                            with c2:
+                                if "drive.google.com" in str(row['佐證照片']):
+                                    file_id = extract_drive_file_id(row['佐證照片'])
+                                    if file_id:
+                                        img_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w400"
+                                        try:
+                                            st.image(img_url, use_container_width=True)
+                                        except:
+                                            st.caption("無法預覽")
+                                        st.caption(f"[查看原圖]({row['佐證照片']})")
+                                else:
+                                    st.caption("無有效照片")
+
+                            # 下方：操作按鈕
+                            b1, b2 = st.columns(2)
+                            with b1:
+                                if st.button("✅ 核可 (撤銷)", key=f"pass_{idx}", type="primary", use_container_width=True):
+                                    if update_appeal_status(row['登錄時間'], "申訴成功(已撤銷)"):
+                                        st.success("已核可")
+                                        time.sleep(1)
+                                        st.rerun()
+                            with b2:
+                                if st.button("❌ 駁回 (維持)", key=f"reject_{idx}", type="secondary", use_container_width=True):
+                                    if update_appeal_status(row['登錄時間'], "申訴駁回(維持扣分)"):
+                                        st.error("已駁回")
+                                        time.sleep(1)
+                                        st.rerun()
 
                 st.markdown("---")
                 csv = sorted_df.to_csv(index=False).encode('utf-8-sig')
@@ -928,4 +924,3 @@ elif app_mode == "衛生組後台":
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
-
