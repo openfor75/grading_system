@@ -14,6 +14,13 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 
+def extract_drive_file_id(url):
+    """從 Google Drive 網址中提取檔案 ID"""
+    # 網址格式通常是 .../d/檔案ID/view...
+    if "/d/" in url:
+        return url.split("/d/")[1].split("/")[0]
+    return None
+
 # --- 設定網頁標題 ---
 st.set_page_config(page_title="衛生組評分系統", layout="wide", page_icon="🧹")
 
@@ -584,16 +591,33 @@ elif app_mode == "我是班上衛生股長":
                     st.write(f"📝 說明: {r['備註']}")
                     st.caption(f"檢查人員: {r['檢查人員']}")
                     
-                    # --- 修正：顯示雲端照片連結 ---
+                    # --- 修正：嘗試直接預覽 Google Drive 照片 ---
                     if r['照片路徑']:
                         st.markdown("##### 📸 佐證照片")
                         links = str(r['照片路徑']).split(";")
+                        
+                        # 建立相簿瀏覽 (如果有多張照片)
+                        cols = st.columns(len(links))
+                        
                         for i, link in enumerate(links):
                             if "drive.google.com" in link:
-                                st.markdown(f"[{i+1}. 點此查看照片]({link})")
+                                file_id = extract_drive_file_id(link)
+                                if file_id:
+                                    # 轉換成直連圖片網址
+                                    img_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+                                    
+                                    # 顯示圖片
+                                    with cols[i % len(cols)]: # 避免欄位不夠，循環使用
+                                        try:
+                                            st.image(img_url, caption=f"照片 {i+1}", use_container_width=True)
+                                        except:
+                                            st.warning(f"照片 {i+1} 無法預覽")
+                                    
+                                    # 保留原始連結，以防圖片跑不出來
+                                    st.caption(f"[👉 點此開啟原圖]({link})")
                             else:
-                                # 相容舊的本地路徑 (若有)
-                                st.text(f"本地照片(無法雲端顯示): {link}")
+                                # 相容舊的本地路徑
+                                st.text(f"本地照片: {link}")
 
                     if total_raw > 2 and r['晨間打掃原始分'] == 0:
                         st.info("💡系統提示：單項每日扣分上限為 2 分 (手機、晨掃除外)，最終成績將由後台自動計算上限。")
@@ -854,5 +878,6 @@ elif app_mode == "衛生組後台":
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
+
 
 
