@@ -402,8 +402,8 @@ if app_mode == "我是糾察隊(評分)":
             input_code = st.text_input("請輸入隊伍通行碼", type="password")
             if st.button("登入"):
                 if input_code == st.secrets["system_config"]["team_password"]:
-                   st.session_state["team_logged_in"] = True
-                   st.rerun()
+                    st.session_state["team_logged_in"] = True
+                    st.rerun()
                 else: st.error("通行碼錯誤")
     
     if st.session_state["team_logged_in"]:
@@ -417,22 +417,26 @@ if app_mode == "我是糾察隊(評分)":
             filtered_inspectors = [p for p in INSPECTOR_LIST if p["id_prefix"] == selected_prefix]
             inspector_name = st.radio("步驟 2：點選身份", [p["label"] for p in filtered_inspectors])
             current_inspector_data = next((p for p in INSPECTOR_LIST if p["label"] == inspector_name), None)
+            
             allowed_roles = current_inspector_data.get("allowed_roles", ["內掃檢查"])
-            # 刪除「晨間打掃」選項，改由衛生組後台處理
+            # 刪除「晨間打掃」選項，改由衛生組後台處理 (重要修正)
             allowed_roles = [r for r in allowed_roles if r != "晨間打掃"]
             
             st.markdown("---")
             col_date, col_role = st.columns(2)
             input_date = col_date.date_input("檢查日期", today_tw)
             if len(allowed_roles) > 1: role = col_role.radio("請選擇檢查項目", allowed_roles, horizontal=True)
-            else: role = allowed_roles[0]; col_role.info(f"📋 您的負責項目：**{role}**")
+            elif allowed_roles: role = allowed_roles[0]; col_role.info(f"📋 您的負責項目：**{role}**")
+            else: st.warning("您的身份沒有被分配任何評分項目。"); return # 加上無角色處理
             
             week_num = get_week_num(input_date)
             st.caption(f"📅 第 {week_num} 週")
             
             main_df = load_main_data()
+            assigned_classes = current_inspector_data.get("assigned_classes", []) # 修正：抓取指派班級
 
-        elif role == "垃圾/回收檢查":
+            if role == "垃圾/回收檢查":
+                # 垃圾/回收檢查邏輯不變
                 st.info("🗑️ 全校垃圾檢查 (每日每班上限扣2分)")
                 trash_cat = st.radio("違規項目", ["一般垃圾", "紙類", "網袋", "其他回收"], horizontal=True)
                 with st.form("trash_form"):
@@ -451,20 +455,30 @@ if app_mode == "我是糾察隊(評分)":
                         st.success(f"已登記 {cnt} 班" if cnt else "無違規")
                         st.rerun()
 
-            else:
+            elif role in ["內掃檢查", "外掃檢查"]: # 統一處理內掃和外掃
                 st.markdown("### 🏫選擇班級")
-                if assigned_classes: selected_class = st.radio("請點選班級", assigned_classes)
+                if assigned_classes: 
+                    # 使用 radio 確保選中的班級是有效的
+                    selected_class = st.radio("請點選班級 (指派範圍)", assigned_classes)
                 else:
                     g = st.radio("年級", grades, horizontal=True)
-                    selected_class = st.radio("班級", [c["name"] for c in structured_classes if c["grade"] == g], horizontal=True)
-                
+                    # 確保班級列表不為空
+                    class_options_for_grade = [c["name"] for c in structured_classes if c["grade"] == g]
+                    if class_options_for_grade:
+                        selected_class = st.radio("班級 (全校範圍)", class_options_for_grade, horizontal=True)
+                    else:
+                        st.warning("該年級無班級資料。")
+                        return
+
                 if selected_class:
                     if check_duplicate_record(main_df, input_date, inspector_name, role, selected_class):
-                         st.warning(f"⚠️ 注意：您今天已經評過「{selected_class}」了！")
+                            st.warning(f"⚠️ 注意：您今天已經評過「{selected_class}」了！")
 
                     st.info(f"📍 正在評分：**{selected_class}**")
                     with st.form("scoring_form", clear_on_submit=True):
                         in_s = 0; out_s = 0; ph_c = 0; note = ""
+                        
+                        # 內掃/外掃評分邏輯
                         if role == "內掃檢查":
                             if st.radio("結果", ["❌ 違規", "✨ 乾淨"], horizontal=True) == "❌ 違規":
                                 in_s = st.number_input("內掃扣分 (上限2分)", 0); note = st.text_input("說明", placeholder="黑板未擦"); ph_c = st.number_input("手機人數 (無上限)", 0)
@@ -494,14 +508,15 @@ elif app_mode == "我是班上衛生股長":
         g = st.radio("步驟 1：選擇年級", grades, horizontal=True)
         class_options = [c["name"] for c in structured_classes if c["grade"] == g]
 
-        # 確保在選擇班級前，先設定預設或上次的選擇
+        # 確保在選擇班級前，先設定預設或上次的選擇 (重要修正)
         if 'cls_selected' not in st.session_state or st.session_state.cls_selected not in class_options:
             cls = class_options[0] if class_options else None
             if cls: st.session_state.cls_selected = cls
         else:
             cls = st.session_state.cls_selected
 
-        cls = st.radio("步驟 2：選擇班級", class_options, horizontal=True, index=class_options.index(cls) if cls in class_options else 0)
+        cls_index = class_options.index(cls) if cls in class_options else 0
+        cls = st.radio("步驟 2：選擇班級", class_options, horizontal=True, index=cls_index)
         st.session_state.cls_selected = cls # 儲存選擇
 
         st.divider()
@@ -527,11 +542,14 @@ elif app_mode == "我是班上衛生股長":
                     st.write(f"📝 說明: {r['備註']}")
                     st.caption(f"檢查人員: {r['檢查人員']}")
                     if total_raw > 2 and r['晨間打掃原始分'] == 0:
-                         st.info("💡系統提示：單項每日扣分上限為 2 分 (手機、晨掃除外)，最終成績將由後台自動計算上限。")
+                            st.info("💡系統提示：單項每日扣分上限為 2 分 (手機、晨掃除外)，最終成績將由後台自動計算上限。")
 
                     # 修改點2：申訴功能整合在紀錄下方
                     # 判斷是否為3天內 + 有扣分
-                    record_date_obj = pd.to_datetime(r['日期']).date() if isinstance(r['日期'], str) else r['日期']
+                    try:
+                        record_date_obj = pd.to_datetime(r['日期']).date() if isinstance(r['日期'], str) else r['日期']
+                    except:
+                        record_date_obj = date.min # 無效日期視為過期
                     
                     if record_date_obj >= three_days_ago and (total_raw > 0 or r['手機人數'] > 0):
                         st.markdown("---")
@@ -583,7 +601,8 @@ elif app_mode == "衛生組後台":
     pwd = st.text_input("管理密碼", type="password")
     
     if pwd == st.secrets["system_config"]["admin_password"]:
-        tab1, tab2, tab3_new, tab4, tab5 = st.tabs(["📊 成績報表", "📧 寄送通知", "🧹 晨間打掃", "📄 名單管理", "📣 申訴管理"])
+        # 修正：移除 tab3, tab4 (資料刪除, 設定)，並將 tab3_new 設為晨間打掃
+        tab1, tab2, tab3_new, tab4, tab5 = st.tabs(["📊 成績報表", "📧 寄送通知", "🧹 晨間打掃評分", "📄 名單管理", "📣 申訴管理"])
         
         # 1. 成績報表
         with tab1:
@@ -620,9 +639,9 @@ elif app_mode == "衛生組後台":
                     final_report = final_report.sort_values("總成績", ascending=False)
                     
                     try:
-                       st.dataframe(final_report.style.format("{:.0f}").background_gradient(cmap="RdYlGn", subset=["總成績"], vmin=60, vmax=90))
+                        st.dataframe(final_report.style.format("{:.0f}").background_gradient(cmap="RdYlGn", subset=["總成績"], vmin=60, vmax=90))
                     except:
-                       st.dataframe(final_report)
+                        st.dataframe(final_report)
                     
                     csv = final_report.to_csv(index=False).encode('utf-8-sig')
                     st.download_button("📥下載統計報表(CSV)", csv, f"report_weeks_{selected_weeks}.csv")
@@ -679,7 +698,7 @@ elif app_mode == "衛生組後台":
                     st.success(f"✅ 寄送完成！成功寄出 {success_count} 封。"); st.session_state.mail_preview = None
 
 
-          # 這是新的 tab3_new: 晨間打掃評分
+        # 3. 晨間打掃評分 (已從糾察隊模式轉移過來)
         with tab3_new:
             st.subheader("🧹 晨間打掃評分 (限組長使用)")
             main_df = load_main_data()
@@ -692,7 +711,7 @@ elif app_mode == "衛生組後台":
             morning_score = col_score.number_input("每人扣分 (預設1分/無上限)", min_value=1, step=1, value=1)
 
             week_num = get_week_num(input_date)
-        
+            
             if check_duplicate_record(main_df, input_date, inspector_name, "晨間打掃"):
                 st.warning(f"⚠️ 系統偵測：您今天 ({input_date}) 已經送出過「晨間打掃」的紀錄囉！")
 
@@ -734,22 +753,55 @@ elif app_mode == "衛生組後台":
 
             elif status == "no_data": st.warning("無輪值資料")
             else: st.error("讀取失敗")
-        
-        # 5. 名單說明
-        with tab5:
-            st.info("請至 Google Sheets 修改：roster, inspectors, duty, teachers, appeals")
-            if st.button("🔄 重新讀取名單"): st.cache_data.clear(); st.success("快取已清除")
             
-        # 6. 申訴管理
-        with tab6:
-            st.subheader("📣 申訴案件管理")
+            
+        # 4. 名單管理 (原來的 tab5)
+        with tab4:
+            st.subheader("📄 名單管理")
+            
+            col_list_1, col_list_2 = st.columns(2)
+            
+            with col_list_1:
+                st.markdown("##### 糾察隊名單 (inspectors)")
+                st.info("請在 Google Sheets 編輯此表，這裡僅顯示預覽。")
+                df_inspectors = pd.DataFrame(load_inspector_list())
+                st.dataframe(df_inspectors.drop(columns=["allowed_roles", "id_prefix"]), hide_index=True)
+                
+            with col_list_2:
+                st.markdown("##### 導師信箱名單 (teachers)")
+                st.info("請在 Google Sheets 編輯此表，這裡僅顯示預覽。")
+                st.dataframe(pd.DataFrame(TEACHER_MAILS).T, use_container_width=True)
+                
+            st.markdown("---")
+            st.subheader("🗓️ 學期設定")
+            st.info("設定學期開始日期，影響週次計算。")
+            
+            semester_start = st.date_input("學期開始日 (yyyy-mm-dd)", datetime.strptime(SYSTEM_CONFIG["semester_start"], "%Y-%m-%d").date())
+            
+            if st.button("💾 儲存學期設定"):
+                if save_setting("semester_start", str(semester_start)):
+                    st.success("✅ 學期設定儲存成功！")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error("❌ 儲存失敗。")
+
+
+        # 5. 申訴管理 (原來的 tab6)
+        with tab5:
+            st.subheader("📣 申訴管理")
             appeals_df = load_appeals()
-            if not appeals_df.empty:
-                st.dataframe(appeals_df)
-                st.caption("提示：目前僅提供檢視功能，狀態更改請至 Google Sheets (分頁 appeals) 操作")
+            
+            if appeals_df.empty:
+                st.info("目前無申訴紀錄。")
             else:
-                st.info("目前無申訴案件")
+                appeals_df = appeals_df.sort_values("登錄時間", ascending=False)
+                st.dataframe(appeals_df, use_container_width=True)
+                st.info("請在 Google Sheets 處理並更新 '處理狀態' 欄位。")
+                
+                # 下載申訴報表
+                csv = appeals_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥下載申訴報表(CSV)", csv, f"appeal_report_{today_tw}.csv")
+                
     else:
-        st.error("密碼錯誤")
-
-
+        st.error("❌ 密碼錯誤，請重新輸入。")
