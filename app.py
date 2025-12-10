@@ -603,8 +603,8 @@ elif app_mode == "我是班上衛生股長":
                             if "drive.google.com" in link:
                                 file_id = extract_drive_file_id(link)
                                 if file_id:
-                                    # 轉換成直連圖片網址
-                                    img_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+                                    # 改用 thumbnail 連結，sz=w1000 代表寬度設為 1000px (夠清晰且載入快)
+                                    img_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w1000"
                                     
                                     # 顯示圖片
                                     with cols[i % len(cols)]: # 避免欄位不夠，循環使用
@@ -878,6 +878,7 @@ elif app_mode == "衛生組後台":
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
+
 
 
 
