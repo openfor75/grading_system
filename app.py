@@ -8,18 +8,9 @@ from datetime import datetime, date, timedelta
 import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-
-# --- 新增 Google Drive 相關套件 ---
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
-
-def extract_drive_file_id(url):
-    """從 Google Drive 網址中提取檔案 ID"""
-    # 網址格式通常是 .../d/檔案ID/view...
-    if "/d/" in url:
-        return url.split("/d/")[1].split("/")[0]
-    return None
 
 # --- 設定網頁標題 ---
 st.set_page_config(page_title="衛生組評分系統", layout="wide", page_icon="🧹")
@@ -60,7 +51,6 @@ APPEAL_COLUMNS = [
 # ==========================================
 
 def get_creds_dict():
-    """統一取得 secrets 憑證字典"""
     if "gcp_service_account" not in st.secrets:
         st.error("❌ 找不到 secrets 設定，請在 Streamlit Cloud 後台設定 Secrets。")
         return None
@@ -81,11 +71,9 @@ def get_gspread_client():
 
 @st.cache_resource
 def get_drive_service():
-    """取得 Google Drive API 服務物件"""
     try:
         creds_dict = get_creds_dict()
         if not creds_dict: return None
-        # Drive API 需要使用 google.oauth2.service_account
         creds = service_account.Credentials.from_service_account_info(
             creds_dict, scopes=['https://www.googleapis.com/auth/drive']
         )
@@ -96,14 +84,10 @@ def get_drive_service():
         return None
 
 def upload_to_drive(file_obj, filename):
-    """
-    將檔案上傳到 Google Drive (支援共用雲端硬碟 Shared Drive)
-    修正: 加入 supportsAllDrives=True 參數
-    """
+    """將檔案上傳到 Google Drive (支援共用雲端硬碟)"""
     service = get_drive_service()
     if not service: return "上傳失敗(無連線)"
     
-    # 這是您在 secrets 設定的資料夾 ID (必須位於「共用雲端硬碟」內)
     folder_id = st.secrets.get("system_config", {}).get("drive_folder_id", None)
     
     file_metadata = {'name': filename}
@@ -112,28 +96,28 @@ def upload_to_drive(file_obj, filename):
     
     try:
         file_obj.seek(0)
-        
-        media = MediaIoBaseUpload(
-            file_obj, 
-            mimetype=file_obj.type,
-            resumable=True 
-        )
-        
-        # 關鍵修正：加入 supportsAllDrives=True
+        media = MediaIoBaseUpload(file_obj, mimetype=file_obj.type, resumable=True)
         file = service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id, webViewLink, thumbnailLink',
-            supportsAllDrives=True  # <--- 必須加這行才能上傳到共用雲端硬碟
+            supportsAllDrives=True
         ).execute()
-        
         return file.get('webViewLink')
     except Exception as e:
         print(f"Drive Upload Error: {e}")
-        # 如果錯誤訊息包含 supportsAllDrives，通常代表資料夾位置不對
         st.error(f"上傳失敗: {e}")
         return "上傳失敗"
-        
+
+def extract_drive_file_id(url):
+    """從 Google Drive 網址中提取檔案 ID"""
+    if "/d/" in url:
+        try:
+            return url.split("/d/")[1].split("/")[0]
+        except:
+            return None
+    return None
+
 @st.cache_resource(ttl=21600)
 def get_spreadsheet_object():
     client = get_gspread_client()
@@ -177,7 +161,7 @@ def clean_id(val):
         return str(val).strip()
 
 # ==========================================
-# 2. 資料讀取
+# 2. 資料讀取與寫入 (含更新狀態函式)
 # ==========================================
 
 @st.cache_data(ttl=60)
@@ -238,8 +222,17 @@ def save_entry(new_entry):
 def save_appeal(entry):
     ws = get_worksheet(SHEET_TABS["appeals"])
     if not ws: st.error("申訴系統連線失敗"); return
-    if not ws.get_all_values(): ws.append_row(APPEAL_COLUMNS)
     
+    # 確保標題列存在
+    try:
+        existing_data = ws.get_all_values()
+        if not existing_data or existing_data[0] != APPEAL_COLUMNS:
+            if not existing_data:
+                ws.append_row(APPEAL_COLUMNS)
+            else:
+                ws.insert_row(APPEAL_COLUMNS, 1)
+    except: pass
+
     row = []
     for col in APPEAL_COLUMNS:
         val = entry.get(col, "")
@@ -250,6 +243,21 @@ def save_appeal(entry):
         st.cache_data.clear()
         return True
     except: return False
+
+def update_appeal_status(record_time, new_status):
+    """根據登錄時間找到該筆申訴，並更新狀態 (修復 NameError 關鍵)"""
+    ws = get_worksheet(SHEET_TABS["appeals"])
+    if not ws: return False
+    try:
+        # 在 '登錄時間' (第9欄) 尋找對應的 timestamp
+        cell = ws.find(record_time) 
+        # 更新該列的 '處理狀態' (第8欄)
+        ws.update_cell(cell.row, 8, new_status)
+        st.cache_data.clear() 
+        return True
+    except Exception as e:
+        st.error(f"更新失敗: {e}")
+        return False
 
 @st.cache_data(ttl=60)
 def load_appeals():
@@ -540,11 +548,9 @@ if app_mode == "我是糾察隊(評分)":
                         is_fix = st.checkbox("🚩 修正單"); files = st.file_uploader("照片", accept_multiple_files=True)
                         if st.form_submit_button("送出"):
                             path_str = ""
-                            # --- 修正：改用 Drive 上傳 ---
                             if files:
                                 upload_links = []
                                 for f in files:
-                                    # 檔名增加時間戳記避免重複
                                     fname = f"{input_date}_{selected_class}_{f.name}"
                                     link = upload_to_drive(f, fname)
                                     upload_links.append(link)
@@ -591,33 +597,30 @@ elif app_mode == "我是班上衛生股長":
                     st.write(f"📝 說明: {r['備註']}")
                     st.caption(f"檢查人員: {r['檢查人員']}")
                     
-                    # --- 修正：嘗試直接預覽 Google Drive 照片 ---
+                    # --- 修正：預覽照片 (優化版) ---
                     if r['照片路徑']:
                         st.markdown("##### 📸 佐證照片")
-                        links = str(r['照片路徑']).split(";")
+                        # 過濾掉空字串
+                        links = [l for l in str(r['照片路徑']).split(";") if l.strip()]
                         
-                        # 建立相簿瀏覽 (如果有多張照片)
-                        cols = st.columns(len(links))
-                        
-                        for i, link in enumerate(links):
-                            if "drive.google.com" in link:
-                                file_id = extract_drive_file_id(link)
-                                if file_id:
-                                    # 改用 thumbnail 連結，sz=w1000 代表寬度設為 1000px (夠清晰且載入快)
-                                    img_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w1000"
-                                    
-                                    # 顯示圖片
-                                    with cols[i % len(cols)]: # 避免欄位不夠，循環使用
-                                        try:
-                                            st.image(img_url, caption=f"照片 {i+1}", use_container_width=True)
-                                        except:
-                                            st.warning(f"照片 {i+1} 無法預覽")
-                                    
-                                    # 保留原始連結，以防圖片跑不出來
-                                    st.caption(f"[👉 點此開啟原圖]({link})")
-                            else:
-                                # 相容舊的本地路徑
-                                st.text(f"本地照片: {link}")
+                        # 顯示圖片迴圈
+                        if links:
+                            cols = st.columns(len(links))
+                            for i, link in enumerate(links):
+                                if "drive.google.com" in link:
+                                    file_id = extract_drive_file_id(link)
+                                    if file_id:
+                                        img_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w1000"
+                                        # 確保有足夠的 column
+                                        col = cols[i] if i < len(cols) else st
+                                        with col:
+                                            try:
+                                                st.image(img_url, caption=f"照片 {i+1}", use_container_width=True)
+                                            except:
+                                                st.warning(f"照片 {i+1} 無法預覽")
+                                        st.caption(f"[👉 點此開啟原圖]({link})")
+                                else:
+                                    st.text(f"本地照片: {link}")
 
                     if total_raw > 2 and r['晨間打掃原始分'] == 0:
                         st.info("💡系統提示：單項每日扣分上限為 2 分 (手機、晨掃除外)，最終成績將由後台自動計算上限。")
@@ -641,7 +644,6 @@ elif app_mode == "我是班上衛生股長":
                                 elif not proof_file:
                                     st.error("❌ 請上傳佐證照片")
                                 else:
-                                    # --- 修正：申訴照片也上傳 Drive ---
                                     fname = f"appeal_{cls}_{proof_file.name}"
                                     drive_link = upload_to_drive(proof_file, fname)
                                         
@@ -652,7 +654,7 @@ elif app_mode == "我是班上衛生股長":
                                         "違規項目": f"{r['評分項目']} ({r['備註']})",
                                         "原始扣分": str(total_raw),
                                         "申訴理由": reason,
-                                        "佐證照片": drive_link, # 存雲端連結
+                                        "佐證照片": drive_link,
                                         "處理狀態": "待處理",
                                         "登錄時間": datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
                                     }
@@ -851,7 +853,7 @@ elif app_mode == "衛生組後台":
                 else:
                     st.error("❌ 儲存失敗。")
 
-# 5. 申訴管理
+        # 5. 申訴管理
         with tab5:
             st.subheader("📣 申訴管理")
             appeals_df = load_appeals()
@@ -859,11 +861,9 @@ elif app_mode == "衛生組後台":
             if appeals_df.empty:
                 st.info("目前無申訴紀錄。")
             else:
-                # --- 1. 顯示申訴列表 ---
                 st.markdown("### 📋 申訴紀錄一覽")
                 sorted_df = appeals_df.sort_values("登錄時間", ascending=False)
                 
-                # 使用 LinkColumn 讓照片可點擊
                 st.dataframe(
                     sorted_df, 
                     use_container_width=True,
@@ -875,22 +875,16 @@ elif app_mode == "衛生組後台":
                 
                 st.markdown("---")
                 
-                # --- 2. 新增：審核操作區 ---
+                # --- 案件審核區 ---
                 st.markdown("### ⚖️ 案件審核區")
-                
-                # 篩選出 "待處理" 的案件
                 pending_cases = sorted_df[sorted_df["處理狀態"] == "待處理"]
                 
                 if not pending_cases.empty:
-                    # 製作一個易讀的選項清單 (顯示：班級 - 違規項目 - 申訴理由)
                     pending_cases["選項標籤"] = pending_cases.apply(
                         lambda x: f"【{x['班級']}】{x['違規項目']} (理由: {x['申訴理由'][:10]}...)", axis=1
                     )
                     
-                    # 建立選單
                     target_case_label = st.selectbox("請選擇要處理的案件：", pending_cases["選項標籤"])
-                    
-                    # 抓出被選中那筆資料的 "登錄時間" (作為唯一 ID)
                     target_row = pending_cases[pending_cases["選項標籤"] == target_case_label].iloc[0]
                     target_id = target_row["登錄時間"]
                     
@@ -902,7 +896,7 @@ elif app_mode == "衛生組後台":
                         if st.button("✅ 核可 (撤銷扣分)", type="primary", use_container_width=True):
                             if update_appeal_status(target_id, "申訴成功(已撤銷)"):
                                 st.success("已更新為：申訴成功")
-                                time.sleep(1) # 等待一下讓使用者看到成功訊息
+                                time.sleep(1)
                                 st.rerun()
                     
                     with col_reject:
@@ -914,15 +908,9 @@ elif app_mode == "衛生組後台":
                 else:
                     st.success("🎉 目前沒有待處理的申訴案件！")
 
-                # 下載報表功能保留
                 st.markdown("---")
                 csv = sorted_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button("📥 下載申訴報表 (CSV)", csv, f"appeal_report_{today_tw}.csv")
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
-
-
-
-
-
