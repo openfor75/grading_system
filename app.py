@@ -1,15 +1,18 @@
 import streamlit as st
 import pandas as pd
-import os
 import smtplib
 import time
-import io
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
 import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
+# --- 新增 Google Drive 相關套件 ---
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+from google.oauth2 import service_account
 
 # --- 設定網頁標題 ---
 st.set_page_config(page_title="衛生組評分系統", layout="wide", page_icon="🧹")
@@ -33,11 +36,6 @@ SHEET_TABS = {
     "appeals": "appeals"        # 申訴紀錄
 }
 
-# 暫存圖片路徑
-IMG_DIR = "evidence_photos"
-if not os.path.exists(IMG_DIR):
-    os.makedirs(IMG_DIR)
-
 # 完整欄位定義
 EXPECTED_COLUMNS = [
     "日期", "週次", "班級", "評分項目", "檢查人員",
@@ -51,23 +49,70 @@ APPEAL_COLUMNS = [
 ]
 
 # ==========================================
-# 1. Google Sheets 連線與工具函式
+# 1. Google Sheets & Drive 連線工具
 # ==========================================
+
+def get_creds_dict():
+    """統一取得 secrets 憑證字典"""
+    if "gcp_service_account" not in st.secrets:
+        st.error("❌ 找不到 secrets 設定，請在 Streamlit Cloud 後台設定 Secrets。")
+        return None
+    return dict(st.secrets["gcp_service_account"])
 
 @st.cache_resource
 def get_gspread_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     try:
-        if "gcp_service_account" not in st.secrets:
-            st.error("❌ 找不到 secrets 設定，請在 Streamlit Cloud 後台設定 Secrets。")
-            return None
-        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds_dict = get_creds_dict()
+        if not creds_dict: return None
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         return client
     except Exception as e:
-        st.error(f"❌ Google連線失敗: {e}")
+        st.error(f"❌ Google Sheet 連線失敗: {e}")
         return None
+
+@st.cache_resource
+def get_drive_service():
+    """取得 Google Drive API 服務物件"""
+    try:
+        creds_dict = get_creds_dict()
+        if not creds_dict: return None
+        # Drive API 需要使用 google.oauth2.service_account
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=['https://www.googleapis.com/auth/drive']
+        )
+        service = build('drive', 'v3', credentials=creds)
+        return service
+    except Exception as e:
+        st.error(f"❌ Google Drive 連線失敗: {e}")
+        return None
+
+def upload_to_drive(file_obj, filename):
+    """將檔案上傳到 Google Drive 並回傳連結"""
+    service = get_drive_service()
+    if not service: return "上傳失敗(無連線)"
+    
+    # 請在 secrets 中設定 drive_folder_id，如果沒有設定，預設會存到根目錄(可能很亂)
+    folder_id = st.secrets.get("system_config", {}).get("drive_folder_id", None)
+    
+    file_metadata = {'name': filename}
+    if folder_id:
+        file_metadata['parents'] = [folder_id]
+    
+    try:
+        media = MediaIoBaseUpload(file_obj, mimetype=file_obj.type)
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink, thumbnailLink'
+        ).execute()
+        
+        # 回傳 webViewLink (這是給人看的連結)
+        return file.get('webViewLink')
+    except Exception as e:
+        st.error(f"上傳 Drive 發生錯誤: {e}")
+        return "上傳失敗"
 
 @st.cache_resource(ttl=21600)
 def get_spreadsheet_object():
@@ -194,19 +239,6 @@ def load_appeals():
         data = ws.get_all_records()
         return pd.DataFrame(data)
     except: return pd.DataFrame(columns=APPEAL_COLUMNS)
-
-def overwrite_all_data(df):
-    ws = get_worksheet(SHEET_TABS["main"])
-    if ws:
-        try:
-            ws.clear()
-            if "修正" in df.columns: df["修正"] = df["修正"].apply(lambda x: "TRUE" if x else "FALSE")
-            df = df.fillna("")
-            ws.update([df.columns.values.tolist()] + df.values.tolist())
-            st.cache_data.clear()
-            return True
-        except: return False
-    return False
 
 @st.cache_data(ttl=21600)
 def load_roster_dict():
@@ -419,7 +451,6 @@ if app_mode == "我是糾察隊(評分)":
             current_inspector_data = next((p for p in INSPECTOR_LIST if p["label"] == inspector_name), None)
             
             allowed_roles = current_inspector_data.get("allowed_roles", ["內掃檢查"])
-            # 刪除「晨間打掃」選項，改由衛生組後台處理 (重要修正)
             allowed_roles = [r for r in allowed_roles if r != "晨間打掃"]
             
             st.markdown("---")
@@ -427,21 +458,17 @@ if app_mode == "我是糾察隊(評分)":
             input_date = col_date.date_input("檢查日期", today_tw)
             if len(allowed_roles) > 1: role = col_role.radio("請選擇檢查項目", allowed_roles, horizontal=True)
             elif allowed_roles: role = allowed_roles[0]; col_role.info(f"📋 您的負責項目：**{role}**")
-            # ----------------------------------------------------
-            # 修正點：將 return 替換為 st.stop()
-            # ----------------------------------------------------
             else: 
                 st.warning("您的身份沒有被分配任何評分項目。") 
-                st.stop() # 修正：使用 st.stop() 來停止 Streamlit 的執行
+                st.stop()
             
             week_num = get_week_num(input_date)
             st.caption(f"📅 第 {week_num} 週")
             
             main_df = load_main_data()
-            assigned_classes = current_inspector_data.get("assigned_classes", []) # 修正：抓取指派班級
+            assigned_classes = current_inspector_data.get("assigned_classes", [])
 
             if role == "垃圾/回收檢查":
-                # 垃圾/回收檢查邏輯不變
                 st.info("🗑️ 全校垃圾檢查 (每日每班上限扣2分)")
                 trash_cat = st.radio("違規項目", ["一般垃圾", "紙類", "網袋", "其他回收"], horizontal=True)
                 with st.form("trash_form"):
@@ -460,20 +487,18 @@ if app_mode == "我是糾察隊(評分)":
                         st.success(f"已登記 {cnt} 班" if cnt else "無違規")
                         st.rerun()
 
-            elif role in ["內掃檢查", "外掃檢查"]: # 統一處理內掃和外掃
+            elif role in ["內掃檢查", "外掃檢查"]:
                 st.markdown("### 🏫選擇班級")
                 if assigned_classes: 
-                    # 使用 radio 確保選中的班級是有效的
                     selected_class = st.radio("請點選班級 (指派範圍)", assigned_classes)
                 else:
                     g = st.radio("年級", grades, horizontal=True)
-                    # 確保班級列表不為空
                     class_options_for_grade = [c["name"] for c in structured_classes if c["grade"] == g]
                     if class_options_for_grade:
                         selected_class = st.radio("班級 (全校範圍)", class_options_for_grade, horizontal=True)
                     else:
                         st.warning("該年級無班級資料。")
-                        st.stop() # 修正：在此處使用 st.stop() 避免執行錯誤
+                        st.stop()
 
                 if 'selected_class' in locals():
                     if check_duplicate_record(main_df, input_date, inspector_name, role, selected_class):
@@ -483,7 +508,6 @@ if app_mode == "我是糾察隊(評分)":
                     with st.form("scoring_form", clear_on_submit=True):
                         in_s = 0; out_s = 0; ph_c = 0; note = ""
                         
-                        # 內掃/外掃評分邏輯
                         if role == "內掃檢查":
                             if st.radio("結果", ["❌ 違規", "✨ 乾淨"], horizontal=True) == "❌ 違規":
                                 in_s = st.number_input("內掃扣分 (上限2分)", 0); note = st.text_input("說明", placeholder="黑板未擦"); ph_c = st.number_input("手機人數 (無上限)", 0)
@@ -496,11 +520,16 @@ if app_mode == "我是糾察隊(評分)":
                         is_fix = st.checkbox("🚩 修正單"); files = st.file_uploader("照片", accept_multiple_files=True)
                         if st.form_submit_button("送出"):
                             path_str = ""
+                            # --- 修正：改用 Drive 上傳 ---
                             if files:
-                                paths = [os.path.join(IMG_DIR, f"{input_date}_{now_tw.strftime('%H%M%S')}_{i}.jpg") for i in range(len(files))]
-                                for f, p in zip(files, paths): 
-                                    with open(p, "wb") as w: w.write(f.getbuffer())
-                                path_str = ";".join(paths)
+                                upload_links = []
+                                for f in files:
+                                    # 檔名增加時間戳記避免重複
+                                    fname = f"{input_date}_{selected_class}_{f.name}"
+                                    link = upload_to_drive(f, fname)
+                                    upload_links.append(link)
+                                path_str = ";".join(upload_links)
+                            
                             save_entry({"日期": input_date, "週次": week_num, "檢查人員": inspector_name, "登錄時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), "修正": is_fix, "班級": selected_class, "評分項目": role, "內掃原始分": in_s, "外掃原始分": out_s, "手機人數": ph_c, "備註": note, "照片路徑": path_str})
                             st.toast(f"✅ 已儲存：{selected_class}"); st.rerun()
 
@@ -513,7 +542,6 @@ elif app_mode == "我是班上衛生股長":
         g = st.radio("步驟 1：選擇年級", grades, horizontal=True)
         class_options = [c["name"] for c in structured_classes if c["grade"] == g]
 
-        # 確保在選擇班級前，先設定預設或上次的選擇 (重要修正)
         if 'cls_selected' not in st.session_state or st.session_state.cls_selected not in class_options:
             cls = class_options[0] if class_options else None
             if cls: st.session_state.cls_selected = cls
@@ -522,18 +550,15 @@ elif app_mode == "我是班上衛生股長":
 
         cls_index = class_options.index(cls) if cls in class_options else 0
         cls = st.radio("步驟 2：選擇班級", class_options, horizontal=True, index=cls_index)
-        st.session_state.cls_selected = cls # 儲存選擇
+        st.session_state.cls_selected = cls
 
         st.divider()
 
-        # 使用 if cls 確保有選擇的班級，並進行篩選
         if cls:
-            # 篩選資料：只顯示選定班級的紀錄
             c_df = df[df["班級"] == cls].sort_values("登錄時間", ascending=False).copy()
         else:
             c_df = pd.DataFrame()
         
-        # 計算3天前的日期
         three_days_ago = date.today() - timedelta(days=3)
         
         if not c_df.empty:
@@ -542,24 +567,32 @@ elif app_mode == "我是班上衛生股長":
                 total_raw = r['內掃原始分']+r['外掃原始分']+r['垃圾原始分']+r['晨間打掃原始分']
                 phone_msg = f" | 📱手機: {r['手機人數']}" if r['手機人數'] > 0 else ""
                 
-                # 外框顯示
                 with st.expander(f"{r['日期']} - {r['評分項目']} (扣分: {total_raw}){phone_msg}"):
                     st.write(f"📝 說明: {r['備註']}")
                     st.caption(f"檢查人員: {r['檢查人員']}")
+                    
+                    # --- 修正：顯示雲端照片連結 ---
+                    if r['照片路徑']:
+                        st.markdown("##### 📸 佐證照片")
+                        links = str(r['照片路徑']).split(";")
+                        for i, link in enumerate(links):
+                            if "drive.google.com" in link:
+                                st.markdown(f"[{i+1}. 點此查看照片]({link})")
+                            else:
+                                # 相容舊的本地路徑 (若有)
+                                st.text(f"本地照片(無法雲端顯示): {link}")
+
                     if total_raw > 2 and r['晨間打掃原始分'] == 0:
                         st.info("💡系統提示：單項每日扣分上限為 2 分 (手機、晨掃除外)，最終成績將由後台自動計算上限。")
 
-                    # 修改點2：申訴功能整合在紀錄下方
-                    # 判斷是否為3天內 + 有扣分
                     try:
                         record_date_obj = pd.to_datetime(r['日期']).date() if isinstance(r['日期'], str) else r['日期']
                     except:
-                        record_date_obj = date.min # 無效日期視為過期
+                        record_date_obj = date.min
                     
                     if record_date_obj >= three_days_ago and (total_raw > 0 or r['手機人數'] > 0):
                         st.markdown("---")
                         st.markdown("#### 🚨 我要申訴")
-                        # 為每個紀錄建立唯一的表單 key
                         form_key = f"appeal_form_{r['紀錄ID']}_{idx}"
                         with st.form(form_key):
                             reason = st.text_area("申訴理由 (請詳細說明)", height=80, placeholder="例如：已經改善完成，附上照片證明...")
@@ -571,15 +604,10 @@ elif app_mode == "我是班上衛生股長":
                                 elif not proof_file:
                                     st.error("❌ 請上傳佐證照片")
                                 else:
-                                    # 儲存照片
-                                    timestamp = datetime.now(TW_TZ).strftime('%Y%m%d%H%M%S')
-                                    ext = proof_file.name.split('.')[-1]
-                                    fname = f"appeal_{cls}_{timestamp}.{ext}"
-                                    fpath = os.path.join(IMG_DIR, fname)
-                                    with open(fpath, "wb") as f:
-                                        f.write(proof_file.getbuffer())
+                                    # --- 修正：申訴照片也上傳 Drive ---
+                                    fname = f"appeal_{cls}_{proof_file.name}"
+                                    drive_link = upload_to_drive(proof_file, fname)
                                         
-                                    # 儲存申訴資料
                                     appeal_entry = {
                                         "申訴日期": str(date.today()),
                                         "班級": cls,
@@ -587,7 +615,7 @@ elif app_mode == "我是班上衛生股長":
                                         "違規項目": f"{r['評分項目']} ({r['備註']})",
                                         "原始扣分": str(total_raw),
                                         "申訴理由": reason,
-                                        "佐證照片": fpath,
+                                        "佐證照片": drive_link, # 存雲端連結
                                         "處理狀態": "待處理",
                                         "登錄時間": datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
                                     }
@@ -606,7 +634,6 @@ elif app_mode == "衛生組後台":
     pwd = st.text_input("管理密碼", type="password")
     
     if pwd == st.secrets["system_config"]["admin_password"]:
-        # 修正：移除 tab3, tab4 (資料刪除, 設定)，並將 tab3_new 設為晨間打掃
         tab1, tab2, tab3_new, tab4, tab5 = st.tabs(["📊 成績報表", "📧 寄送通知", "🧹 晨間打掃評分", "📄 名單管理", "📣 申訴管理"])
         
         # 1. 成績報表
@@ -653,7 +680,7 @@ elif app_mode == "衛生組後台":
                 else: st.info("請選擇週次")
             else: st.warning("無資料")
             
-# 2. 寄送通知
+        # 2. 寄送通知
         with tab2:
             st.subheader("📧 每日違規通知")
             target_date = st.date_input("選擇日期", today_tw)
@@ -703,12 +730,11 @@ elif app_mode == "衛生組後台":
                     st.success(f"✅ 寄送完成！成功寄出 {success_count} 封。"); st.session_state.mail_preview = None
 
 
-        # 3. 晨間打掃評分 (已從糾察隊模式轉移過來)
+        # 3. 晨間打掃評分
         with tab3_new:
             st.subheader("🧹 晨間打掃評分 (限組長使用)")
             main_df = load_main_data()
 
-            # 使用組長身份資訊作為評分者
             inspector_name = "衛生組長 (系統登錄)" 
 
             col_date, col_score = st.columns(2)
@@ -728,7 +754,6 @@ elif app_mode == "衛生組後台":
                 st.metric("今日應到人數", f"{total_duty} 人")
 
                 with st.form("admin_morning_form", clear_on_submit=True):
-                    # 晨掃表格
                     edited_df = st.data_editor(pd.DataFrame(duty_list), 
                                                column_config={"已完成打掃": st.column_config.CheckboxColumn(default=False), 
                                                               "學號": st.column_config.TextColumn(disabled=True), 
@@ -748,7 +773,6 @@ elif app_mode == "衛生組後台":
                                 tid = clean_id(r["學號"])
                                 tloc = r["掃地區域"]
                                 stu_class = ROSTER_DICT.get(tid, f"查無({tid})")
-                                # 儲存紀錄 (使用組長身份、設定好的扣分)
                                 save_entry({**base, "班級": stu_class, "評分項目": "晨間打掃", 
                                             "晨間打掃原始分": morning_score, "備註": f"晨掃未到 ({tloc}) - 學號:{tid}", 
                                             "晨掃未到者": tid})
@@ -759,8 +783,7 @@ elif app_mode == "衛生組後台":
             elif status == "no_data": st.warning("無輪值資料")
             else: st.error("讀取失敗")
             
-            
-        # 4. 名單管理 (原來的 tab5)
+        # 4. 名單管理
         with tab4:
             st.subheader("📄 名單管理")
             
@@ -791,8 +814,7 @@ elif app_mode == "衛生組後台":
                 else:
                     st.error("❌ 儲存失敗。")
 
-
-        # 5. 申訴管理 (原來的 tab6)
+        # 5. 申訴管理
         with tab5:
             st.subheader("📣 申訴管理")
             appeals_df = load_appeals()
@@ -801,13 +823,21 @@ elif app_mode == "衛生組後台":
                 st.info("目前無申訴紀錄。")
             else:
                 appeals_df = appeals_df.sort_values("登錄時間", ascending=False)
-                st.dataframe(appeals_df, use_container_width=True)
+                
+                # --- 修正：顯示申訴照片連結 ---
+                # 這裡使用 LinkColumn 讓網址變成可點擊
+                st.dataframe(
+                    appeals_df, 
+                    use_container_width=True,
+                    column_config={
+                        "佐證照片": st.column_config.LinkColumn("佐證照片(點擊查看)")
+                    }
+                )
+
                 st.info("請在 Google Sheets 處理並更新 '處理狀態' 欄位。")
                 
-                # 下載申訴報表
                 csv = appeals_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button("📥下載申訴報表(CSV)", csv, f"appeal_report_{today_tw}.csv")
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
-
