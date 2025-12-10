@@ -12,7 +12,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 設定網頁標題 ---
-st.set_page_config(page_title="衛生糾察評分系統(完美整合版)", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="衛生組評分系統", layout="wide", page_icon="🧹")
 
 # ==========================================
 # 0. 基礎設定與時區
@@ -388,11 +388,6 @@ today_tw = now_tw.date()
 st.sidebar.title("🏫 功能選單")
 app_mode = st.sidebar.radio("請選擇模式", ["我是糾察隊(評分)", "我是班上衛生股長", "衛生組後台"])
 
-if st.sidebar.button("🔄 強制更新全校名單"):
-    st.cache_data.clear()
-    st.success("快取已清除")
-    st.rerun()
-
 if st.sidebar.checkbox("顯示系統連線狀態", value=True):
     if get_gspread_client(): st.sidebar.success("✅ Google Sheets 連線正常")
     else: st.sidebar.error("❌ 連線失敗")
@@ -423,7 +418,8 @@ if app_mode == "我是糾察隊(評分)":
             inspector_name = st.radio("步驟 2：點選身份", [p["label"] for p in filtered_inspectors])
             current_inspector_data = next((p for p in INSPECTOR_LIST if p["label"] == inspector_name), None)
             allowed_roles = current_inspector_data.get("allowed_roles", ["內掃檢查"])
-            assigned_classes = current_inspector_data.get("assigned_classes", [])
+            # 刪除「晨間打掃」選項，改由衛生組後台處理
+            allowed_roles = [r for r in allowed_roles if r != "晨間打掃"]
             
             st.markdown("---")
             col_date, col_role = st.columns(2)
@@ -435,41 +431,6 @@ if app_mode == "我是糾察隊(評分)":
             st.caption(f"📅 第 {week_num} 週")
             
             main_df = load_main_data()
-
-            if role == "晨間打掃":
-                if check_duplicate_record(main_df, input_date, inspector_name, role):
-                    st.warning(f"⚠️ 系統偵測：您今天 ({input_date}) 已經送出過「晨間打掃」的紀錄囉！")
-
-                duty_list, status = get_daily_duty(input_date)
-                if status == "success":
-                    st.markdown(f"### 📋 {input_date} 晨掃點名")
-                    total_duty = len(duty_list)
-                    st.metric("今日應到人數", f"{total_duty} 人")
-                    
-                    with st.form("morning_form", clear_on_submit=True):
-                        edited_df = st.data_editor(pd.DataFrame(duty_list), column_config={"已完成打掃": st.column_config.CheckboxColumn(default=False), "學號": st.column_config.TextColumn(disabled=True), "掃地區域": st.column_config.TextColumn(disabled=True)}, hide_index=True, use_container_width=True)
-                        
-                        morning_score = st.number_input("每人扣分 (預設1分/無上限)", min_value=1, step=1, value=1)
-                        
-                        if st.form_submit_button("送出"):
-                            base = {"日期": input_date, "週次": week_num, "檢查人員": inspector_name, "登錄時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), "修正": False}
-                            absent = edited_df[edited_df["已完成打掃"] == False]
-                            
-                            if absent.empty:
-                                st.success("🎉 全員到齊！")
-                            else:
-                                count = 0
-                                for _, r in absent.iterrows():
-                                    tid = clean_id(r["學號"])
-                                    tloc = r["掃地區域"]
-                                    stu_class = ROSTER_DICT.get(tid, f"查無({tid})")
-                                    # 修改點1：備註增加學號資訊
-                                    save_entry({**base, "班級": stu_class, "評分項目": role, "晨間打掃原始分": morning_score, "備註": f"晨掃未到 ({tloc}) - 學號:{tid}", "晨掃未到者": tid})
-                                    count += 1
-                                st.error(f"⚠️ 已登記 {count} 人未到，共扣 {count * morning_score} 分")
-                            st.rerun()
-                elif status == "no_data": st.warning("無輪值資料")
-                else: st.error("讀取失敗")
 
             elif role == "垃圾/回收檢查":
                 st.info("🗑️ 全校垃圾檢查 (每日每班上限扣2分)")
@@ -532,9 +493,25 @@ elif app_mode == "我是班上衛生股長":
         st.write("請依照步驟選擇：")
         g = st.radio("步驟 1：選擇年級", grades, horizontal=True)
         class_options = [c["name"] for c in structured_classes if c["grade"] == g]
-        cls = st.radio("步驟 2：選擇班級", class_options, horizontal=True)
+
+        # 確保在選擇班級前，先設定預設或上次的選擇
+        if 'cls_selected' not in st.session_state or st.session_state.cls_selected not in class_options:
+            cls = class_options[0] if class_options else None
+            if cls: st.session_state.cls_selected = cls
+        else:
+            cls = st.session_state.cls_selected
+
+        cls = st.radio("步驟 2：選擇班級", class_options, horizontal=True, index=class_options.index(cls) if cls in class_options else 0)
+        st.session_state.cls_selected = cls # 儲存選擇
+
         st.divider()
-        c_df = df[df["班級"] == cls].sort_values("登錄時間", ascending=False)
+
+        # 使用 if cls 確保有選擇的班級，並進行篩選
+        if cls:
+            # 篩選資料：只顯示選定班級的紀錄
+            c_df = df[df["班級"] == cls].sort_values("登錄時間", ascending=False).copy()
+        else:
+            c_df = pd.DataFrame()
         
         # 計算3天前的日期
         three_days_ago = date.today() - timedelta(days=3)
@@ -606,7 +583,7 @@ elif app_mode == "衛生組後台":
     pwd = st.text_input("管理密碼", type="password")
     
     if pwd == st.secrets["system_config"]["admin_password"]:
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 成績報表", "📧 寄送通知", "🛠️ 資料刪除", "📅 設定", "📄 名單管理", "📣 申訴管理"])
+        tab1, tab2, tab3_new, tab4, tab5 = st.tabs(["📊 成績報表", "📧 寄送通知", "🧹 晨間打掃", "📄 名單管理", "📣 申訴管理"])
         
         # 1. 成績報表
         with tab1:
@@ -701,37 +678,63 @@ elif app_mode == "衛生組後台":
                         bar.progress((idx + 1) / total)
                     st.success(f"✅ 寄送完成！成功寄出 {success_count} 封。"); st.session_state.mail_preview = None
 
-        # 3. 資料刪除
-        with tab3:
-            st.subheader("🛠️ 資料刪除")
-            df = load_main_data()
-            if not df.empty:
-                del_mode = st.radio("刪除模式", ["單筆刪除", "日期區間刪除 (批次)"])
-                if del_mode == "單筆刪除":
-                    df_display = df.sort_values("登錄時間", ascending=False).head(50).reset_index()
-                    options = {row['index']: f"{row['日期']} | {row['班級']} | {row['評分項目']} (ID:{row['index']})" for i, row in df_display.iterrows()}
-                    selected_indices = st.multiselect("選擇要刪除的紀錄", options=options.keys(), format_func=lambda x: options[x])
-                    if st.button("🗑️確認刪除"):
-                        new_df = df.drop(selected_indices)
-                        if overwrite_all_data(new_df): st.success("刪除成功！"); st.rerun()
-                elif del_mode == "日期區間刪除 (批次)":
-                    c1, c2 = st.columns(2)
-                    d_start = c1.date_input("開始日期"); d_end = c2.date_input("結束日期")
-                    if st.button("⚠️ 刪除此區間資料"):
-                        df["d_tmp"] = pd.to_datetime(df["日期"], errors='coerce').dt.date
-                        mask = (df["d_tmp"] >= d_start) & (df["d_tmp"] <= d_end)
-                        if mask.sum() > 0:
-                            if overwrite_all_data(df[~mask].drop(columns=["d_tmp"])): st.success(f"已刪除 {mask.sum()} 筆"); st.rerun()
-                        else: st.warning("區間無資料")
-            else: st.info("無資料")
 
-        # 4. 設定
-        with tab4:
-            st.subheader("系統設定")
-            curr = SYSTEM_CONFIG.get("semester_start", "2025-08-25")
-            nd = st.date_input("開學日", datetime.strptime(curr, "%Y-%m-%d").date())
-            if st.button("更新開學日"): save_setting("semester_start", str(nd)); st.success("已更新")
-                
+          # 這是新的 tab3_new: 晨間打掃評分
+        with tab3_new:
+            st.subheader("🧹 晨間打掃評分 (限組長使用)")
+            main_df = load_main_data()
+
+            # 使用組長身份資訊作為評分者
+            inspector_name = "衛生組長 (系統登錄)" 
+
+            col_date, col_score = st.columns(2)
+            input_date = col_date.date_input("點名日期", today_tw)
+            morning_score = col_score.number_input("每人扣分 (預設1分/無上限)", min_value=1, step=1, value=1)
+
+            week_num = get_week_num(input_date)
+        
+            if check_duplicate_record(main_df, input_date, inspector_name, "晨間打掃"):
+                st.warning(f"⚠️ 系統偵測：您今天 ({input_date}) 已經送出過「晨間打掃」的紀錄囉！")
+
+            duty_list, status = get_daily_duty(input_date)
+
+            if status == "success":
+                st.markdown(f"### 📋 {input_date} 晨掃點名")
+                total_duty = len(duty_list)
+                st.metric("今日應到人數", f"{total_duty} 人")
+
+                with st.form("admin_morning_form", clear_on_submit=True):
+                    # 晨掃表格
+                    edited_df = st.data_editor(pd.DataFrame(duty_list), 
+                                               column_config={"已完成打掃": st.column_config.CheckboxColumn(default=False), 
+                                                              "學號": st.column_config.TextColumn(disabled=True), 
+                                                              "掃地區域": st.column_config.TextColumn(disabled=True)}, 
+                                               hide_index=True, use_container_width=True)
+
+                    if st.form_submit_button("送出晨掃紀錄"):
+                        base = {"日期": input_date, "週次": week_num, "檢查人員": inspector_name, 
+                                "登錄時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), "修正": False}
+                        absent = edited_df[edited_df["已完成打掃"] == False]
+
+                        if absent.empty:
+                            st.success("🎉 全員到齊！")
+                        else:
+                            count = 0
+                            for _, r in absent.iterrows():
+                                tid = clean_id(r["學號"])
+                                tloc = r["掃地區域"]
+                                stu_class = ROSTER_DICT.get(tid, f"查無({tid})")
+                                # 儲存紀錄 (使用組長身份、設定好的扣分)
+                                save_entry({**base, "班級": stu_class, "評分項目": "晨間打掃", 
+                                            "晨間打掃原始分": morning_score, "備註": f"晨掃未到 ({tloc}) - 學號:{tid}", 
+                                            "晨掃未到者": tid})
+                                count += 1
+                            st.error(f"⚠️ 已登記 {count} 人未到，共扣 {count * morning_score} 分")
+                        st.rerun()
+
+            elif status == "no_data": st.warning("無輪值資料")
+            else: st.error("讀取失敗")
+        
         # 5. 名單說明
         with tab5:
             st.info("請至 Google Sheets 修改：roster, inspectors, duty, teachers, appeals")
@@ -748,3 +751,4 @@ elif app_mode == "衛生組後台":
                 st.info("目前無申訴案件")
     else:
         st.error("密碼錯誤")
+
