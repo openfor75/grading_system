@@ -851,7 +851,7 @@ elif app_mode == "衛生組後台":
                 else:
                     st.error("❌ 儲存失敗。")
 
-        # 5. 申訴管理
+# 5. 申訴管理
         with tab5:
             st.subheader("📣 申訴管理")
             appeals_df = load_appeals()
@@ -859,25 +859,69 @@ elif app_mode == "衛生組後台":
             if appeals_df.empty:
                 st.info("目前無申訴紀錄。")
             else:
-                appeals_df = appeals_df.sort_values("登錄時間", ascending=False)
+                # --- 1. 顯示申訴列表 ---
+                st.markdown("### 📋 申訴紀錄一覽")
+                sorted_df = appeals_df.sort_values("登錄時間", ascending=False)
                 
-                # --- 修正：顯示申訴照片連結 ---
-                # 這裡使用 LinkColumn 讓網址變成可點擊
+                # 使用 LinkColumn 讓照片可點擊
                 st.dataframe(
-                    appeals_df, 
+                    sorted_df, 
                     use_container_width=True,
                     column_config={
-                        "佐證照片": st.column_config.LinkColumn("佐證照片(點擊查看)")
+                        "佐證照片": st.column_config.LinkColumn("佐證照片(點擊查看)"),
+                        "處理狀態": st.column_config.TextColumn("處理狀態", help="請在下方審核區進行操作")
                     }
                 )
-
-                st.info("請在 Google Sheets 處理並更新 '處理狀態' 欄位。")
                 
-                csv = appeals_df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥下載申訴報表(CSV)", csv, f"appeal_report_{today_tw}.csv")
+                st.markdown("---")
+                
+                # --- 2. 新增：審核操作區 ---
+                st.markdown("### ⚖️ 案件審核區")
+                
+                # 篩選出 "待處理" 的案件
+                pending_cases = sorted_df[sorted_df["處理狀態"] == "待處理"]
+                
+                if not pending_cases.empty:
+                    # 製作一個易讀的選項清單 (顯示：班級 - 違規項目 - 申訴理由)
+                    pending_cases["選項標籤"] = pending_cases.apply(
+                        lambda x: f"【{x['班級']}】{x['違規項目']} (理由: {x['申訴理由'][:10]}...)", axis=1
+                    )
+                    
+                    # 建立選單
+                    target_case_label = st.selectbox("請選擇要處理的案件：", pending_cases["選項標籤"])
+                    
+                    # 抓出被選中那筆資料的 "登錄時間" (作為唯一 ID)
+                    target_row = pending_cases[pending_cases["選項標籤"] == target_case_label].iloc[0]
+                    target_id = target_row["登錄時間"]
+                    
+                    st.info(f"正在審核：{target_case_label}")
+                    
+                    col_pass, col_reject = st.columns(2)
+                    
+                    with col_pass:
+                        if st.button("✅ 核可 (撤銷扣分)", type="primary", use_container_width=True):
+                            if update_appeal_status(target_id, "申訴成功(已撤銷)"):
+                                st.success("已更新為：申訴成功")
+                                time.sleep(1) # 等待一下讓使用者看到成功訊息
+                                st.rerun()
+                    
+                    with col_reject:
+                        if st.button("❌ 駁回 (維持扣分)", type="secondary", use_container_width=True):
+                            if update_appeal_status(target_id, "申訴駁回(維持扣分)"):
+                                st.error("已更新為：申訴駁回")
+                                time.sleep(1)
+                                st.rerun()
+                else:
+                    st.success("🎉 目前沒有待處理的申訴案件！")
+
+                # 下載報表功能保留
+                st.markdown("---")
+                csv = sorted_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 下載申訴報表 (CSV)", csv, f"appeal_report_{today_tw}.csv")
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
+
 
 
 
