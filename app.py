@@ -89,11 +89,11 @@ def get_drive_service():
         return None
 
 def upload_to_drive(file_obj, filename):
-    """將檔案上傳到 Google Drive 並回傳連結"""
+    """將檔案上傳到 Google Drive 並回傳連結 (修正 Broken pipe 版)"""
     service = get_drive_service()
     if not service: return "上傳失敗(無連線)"
     
-    # 請在 secrets 中設定 drive_folder_id，如果沒有設定，預設會存到根目錄(可能很亂)
+    # 請在 secrets 中設定 drive_folder_id
     folder_id = st.secrets.get("system_config", {}).get("drive_folder_id", None)
     
     file_metadata = {'name': filename}
@@ -101,16 +101,27 @@ def upload_to_drive(file_obj, filename):
         file_metadata['parents'] = [folder_id]
     
     try:
-        media = MediaIoBaseUpload(file_obj, mimetype=file_obj.type)
+        # 修正 1: 確保檔案指標在開頭
+        file_obj.seek(0)
+        
+        # 修正 2: 開啟 resumable=True (斷點續傳模式)，這能有效解決 Broken pipe
+        media = MediaIoBaseUpload(
+            file_obj, 
+            mimetype=file_obj.type,
+            resumable=True 
+        )
+        
         file = service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id, webViewLink, thumbnailLink'
         ).execute()
         
-        # 回傳 webViewLink (這是給人看的連結)
+        # 回傳 webViewLink
         return file.get('webViewLink')
     except Exception as e:
+        # 印出錯誤到後台 logs 以便除錯
+        print(f"Drive Upload Error: {e}")
         st.error(f"上傳 Drive 發生錯誤: {e}")
         return "上傳失敗"
 
@@ -841,3 +852,4 @@ elif app_mode == "衛生組後台":
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
+
