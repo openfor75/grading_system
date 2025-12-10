@@ -89,11 +89,14 @@ def get_drive_service():
         return None
 
 def upload_to_drive(file_obj, filename):
-    """將檔案上傳到 Google Drive 並回傳連結 (修正 Broken pipe 版)"""
+    """
+    將檔案上傳到 Google Drive (支援共用雲端硬碟 Shared Drive)
+    修正: 加入 supportsAllDrives=True 參數
+    """
     service = get_drive_service()
     if not service: return "上傳失敗(無連線)"
     
-    # 請在 secrets 中設定 drive_folder_id
+    # 這是您在 secrets 設定的資料夾 ID (必須位於「共用雲端硬碟」內)
     folder_id = st.secrets.get("system_config", {}).get("drive_folder_id", None)
     
     file_metadata = {'name': filename}
@@ -101,30 +104,29 @@ def upload_to_drive(file_obj, filename):
         file_metadata['parents'] = [folder_id]
     
     try:
-        # 修正 1: 確保檔案指標在開頭
         file_obj.seek(0)
         
-        # 修正 2: 開啟 resumable=True (斷點續傳模式)，這能有效解決 Broken pipe
         media = MediaIoBaseUpload(
             file_obj, 
             mimetype=file_obj.type,
             resumable=True 
         )
         
+        # 關鍵修正：加入 supportsAllDrives=True
         file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id, webViewLink, thumbnailLink'
+            fields='id, webViewLink, thumbnailLink',
+            supportsAllDrives=True  # <--- 必須加這行才能上傳到共用雲端硬碟
         ).execute()
         
-        # 回傳 webViewLink
         return file.get('webViewLink')
     except Exception as e:
-        # 印出錯誤到後台 logs 以便除錯
         print(f"Drive Upload Error: {e}")
-        st.error(f"上傳 Drive 發生錯誤: {e}")
+        # 如果錯誤訊息包含 supportsAllDrives，通常代表資料夾位置不對
+        st.error(f"上傳失敗: {e}")
         return "上傳失敗"
-
+        
 @st.cache_resource(ttl=21600)
 def get_spreadsheet_object():
     client = get_gspread_client()
@@ -852,4 +854,5 @@ elif app_mode == "衛生組後台":
                 
     else:
         st.error("❌ 密碼錯誤，請重新輸入。")
+
 
