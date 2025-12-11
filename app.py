@@ -315,18 +315,40 @@ try:
         st.cache_data.clear()
         print(f"📥 排入佇列 (Queue Size: {get_task_queue().qsize()})")
 
-    def save_appeal(entry, proof_file=None):
-        ws = get_worksheet(SHEET_TABS["appeals"])
-        if not ws: return False
-        if not ws.get_all_values(): ws.append_row(APPEAL_COLUMNS)
-        if proof_file:
-            proof_file.seek(0)
-            fname = f"Appeal_{entry['班級']}_{datetime.now().strftime('%H%M%S')}.jpg"
-            link = upload_image_to_drive(proof_file, fname)
-            entry["佐證照片"] = link if link else "UPLOAD_FAILED"
-        row = [str(entry.get(col, "")) for col in APPEAL_COLUMNS]
-        try: ws.append_row(row); st.cache_data.clear(); return True
-        except: return False
+def save_appeal(entry, proof_file=None):
+    ws = get_worksheet(SHEET_TABS["appeals"])
+    if not ws:
+        st.error("❌ 無法取得 appeals 工作表")
+        return False
+
+    # 確保標題列存在
+    if not ws.get_all_values():
+        ws.append_row(APPEAL_COLUMNS)
+
+    # 讀取佐證照片
+    if proof_file:
+        proof_file.seek(0)
+        data = proof_file.read()
+        fname = f"Appeal_{entry['班級']}_{datetime.now().strftime('%H%M%S')}.jpg"
+        link = upload_image_to_drive(io.BytesIO(data), fname)
+        entry["佐證照片"] = link if link else "UPLOAD_FAILED"
+    else:
+        entry["佐證照片"] = ""
+
+    # ★★★★★ 這是關鍵：新增預設處理狀態 ★★★★★
+    entry["處理狀態"] = entry.get("處理狀態", "待處理")
+
+    # 按欄位順序寫入 row（避免 KeyError）
+    row = [str(entry.get(col, "")) for col in APPEAL_COLUMNS]
+
+    try:
+        ws.append_row(row)
+        st.success("📩 申訴提交成功")
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"❌ 寫入申訴資料失敗：{e}")
+        return False
 
     @st.cache_data(ttl=60)
     def load_appeals():
@@ -939,5 +961,6 @@ try:
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+
 
 
