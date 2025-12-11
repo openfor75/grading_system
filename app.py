@@ -13,7 +13,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 1. 網頁設定 (必須放第一行) ---
-st.set_page_config(page_title="衛生糾察評分系統(穩定版)", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="衛生糾察評分系統(修正版)", layout="wide", page_icon="🧹")
 
 # --- 2. 捕捉全域錯誤 (防止 Oh no 畫面) ---
 try:
@@ -36,7 +36,7 @@ try:
         "appeals": "appeals"        # 申訴紀錄
     }
 
-    # 暫存圖片路徑
+    # 暫存圖片路徑 (確保資料夾存在)
     IMG_DIR = "evidence_photos"
     if not os.path.exists(IMG_DIR):
         os.makedirs(IMG_DIR)
@@ -92,11 +92,9 @@ try:
                 try:
                     return sheet.worksheet(tab_name)
                 except gspread.WorksheetNotFound:
-                    # 如果找不到分頁，自動建立並補上標題
                     cols = 20
                     if tab_name == "appeals": cols = 10
                     ws = sheet.add_worksheet(title=tab_name, rows=100, cols=cols)
-                    # 補標題
                     if tab_name == "appeals":
                         ws.append_row(APPEAL_COLUMNS)
                     return ws
@@ -131,22 +129,22 @@ try:
             df = pd.DataFrame(data)
             if df.empty: return pd.DataFrame(columns=EXPECTED_COLUMNS)
             
-            # --- 自動修復欄位 (關鍵修正) ---
-            # 如果快取裡的資料沒有新欄位，這裡強制補上，防止 KeyError
             for col in EXPECTED_COLUMNS:
                 if col not in df.columns: 
                     df[col] = "" 
-                
-            # 特別處理 紀錄ID
+            
+            # 紀錄ID處理
             if "紀錄ID" not in df.columns:
                 df["紀錄ID"] = df.index.astype(str)
             else:
-                # 確保全是字串且無空值 (用索引補空值)
                 df["紀錄ID"] = df["紀錄ID"].astype(str)
-                # 如果有空的紀錄ID，用 timestamp + index 補上
                 for idx in df.index:
                     if df.at[idx, "紀錄ID"] == "":
                          df.at[idx, "紀錄ID"] = f"AUTO_{idx}"
+
+            # 強制將照片路徑轉為字串，避免 NaN 錯誤
+            if "照片路徑" in df.columns:
+                df["照片路徑"] = df["照片路徑"].fillna("").astype(str)
 
             numeric_cols = ["內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數"]
             for col in numeric_cols:
@@ -161,7 +159,7 @@ try:
                 
             return df[EXPECTED_COLUMNS]
         except Exception as e: 
-            st.error(f"讀取資料發生錯誤，請截圖給管理員: {e}")
+            st.error(f"讀取資料發生錯誤: {e}")
             return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
     def save_entry(new_entry):
@@ -445,9 +443,9 @@ try:
                 current_inspector_data = next((p for p in INSPECTOR_LIST if p["label"] == inspector_name), None)
                 allowed_roles = current_inspector_data.get("allowed_roles", ["內掃檢查"])
                 
-                # --- 修改點：強制移除晨間打掃權限 (因為已移至後台) ---
+                # --- 強制移除晨間打掃 (移至後台) ---
                 allowed_roles = [r for r in allowed_roles if r != "晨間打掃"]
-                if not allowed_roles: allowed_roles = ["內掃檢查"] # 避免空清單錯誤
+                if not allowed_roles: allowed_roles = ["內掃檢查"] 
                 
                 assigned_classes = current_inspector_data.get("assigned_classes", [])
                 
@@ -481,7 +479,7 @@ try:
                                     cnt += 1
                             st.success(f"已登記 {cnt} 班" if cnt else "無違規")
                             st.rerun()
-                # 一般評分 (內掃/外掃)
+                # 一般評分
                 else:
                     st.markdown("### 🏫選擇班級")
                     if assigned_classes: selected_class = st.radio("請點選班級", assigned_classes)
@@ -516,7 +514,7 @@ try:
                                 save_entry({"日期": input_date, "週次": week_num, "檢查人員": inspector_name, "登錄時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), "修正": is_fix, "班級": selected_class, "評分項目": role, "內掃原始分": in_s, "外掃原始分": out_s, "手機人數": ph_c, "備註": note, "照片路徑": path_str})
                                 st.toast(f"✅ 已儲存：{selected_class}"); st.rerun()
 
-    # --- 模式2: 衛生股長 (整合申訴功能) ---
+    # --- 模式2: 衛生股長 (修正照片顯示) ---
     elif app_mode == "我是班上衛生股長":
         st.title("🔎 班級查詢 & 違規申訴")
         df = load_main_data()
@@ -540,12 +538,16 @@ try:
                         st.write(f"📝 說明: {r['備註']}")
                         st.caption(f"檢查人員: {r['檢查人員']}")
                         
-                        # --- 修改點：新增照片顯示邏輯 ---
-                        if "照片路徑" in r and r["照片路徑"]:
-                            # 將路徑字串依分號切割
-                            photos = [p for p in str(r["照片路徑"]).split(";") if p.strip() and os.path.exists(p)]
-                            if photos:
-                                st.image(photos, caption="違規照片", width=300)
+                        # --- 修正照片顯示邏輯 (除錯用) ---
+                        raw_photo_path = str(r.get("照片路徑", "")).strip()
+                        if raw_photo_path and raw_photo_path.lower() != "nan":
+                            path_list = [p.strip() for p in raw_photo_path.split(";") if p.strip()]
+                            valid_photos = [p for p in path_list if os.path.exists(p)]
+                            
+                            if valid_photos:
+                                st.image(valid_photos, caption="違規照片", width=300)
+                            else:
+                                st.warning(f"⚠️ 有照片紀錄但檔案已從伺服器清除 (路徑: {path_list})")
                         # -----------------------------
 
                         if total_raw > 2 and r['晨間打掃原始分'] == 0:
@@ -600,7 +602,7 @@ try:
         pwd = st.text_input("管理密碼", type="password")
         
         if pwd == st.secrets["system_config"]["admin_password"]:
-            # --- 修改點：新增 tab7 "晨掃管理" ---
+            # --- 確保這裡有 7 個項目，並且 unpack 給 7 個變數 ---
             tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 成績報表", "📧 寄送通知", "🛠️ 資料刪除", "📅 設定", "📄 名單管理", "📣 申訴管理", "🧹 晨掃管理"])
             
             # 1. 成績報表
@@ -742,7 +744,7 @@ try:
                 else:
                     st.info("目前無申訴案件")
 
-            # 7. 晨掃管理 (新功能)
+            # 7. 晨掃管理 (確保有定義 tab7)
             with tab7:
                 st.subheader("🧹 晨間打掃評分 (後台版)")
                 m_date = st.date_input("評分日期", today_tw, key="morning_date")
