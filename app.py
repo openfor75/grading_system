@@ -11,8 +11,8 @@ import re
 import sqlite3
 import json
 import random
-from email.mime_text import MIMEText
-from email.mime_multipart import MIMEMultipart
+from email.mime.text import MIMEText           # ← 修正這行
+from email.mime.multipart import MIMEMultipart # ← 修正這行
 from datetime import datetime, date, timedelta
 import pytz
 import gspread
@@ -1188,6 +1188,7 @@ try:
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+
 
 
 
