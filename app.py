@@ -136,13 +136,6 @@ try:
         except: return str(val).strip()
 
     # ==========================================
-    # 圖片暫存資料夾：只在本機短暫存放，避免 queue 塞滿記憶體
-    # ==========================================
-    IMG_DIR = "evidence_photos"
-    if not os.path.exists(IMG_DIR):
-        os.makedirs(IMG_DIR, exist_ok=True)    
-    
-    # ==========================================
     # 背景佇列系統 (Background Queue)
     # ==========================================
     @st.cache_resource
@@ -155,74 +148,34 @@ try:
         while True:
             task = q.get()
             try:
-                entry = task.get('entry', {}) or {}
-                # 新版：使用 image_paths 儲存檔案路徑
-                image_paths = task.get('image_paths', [])
-                filenames = task.get('filenames', []) or []
-
-                # 舊版相容：如果沒有 image_paths，才去看 images（in-memory bytes）
-                images_data = task.get('images')
-
+                entry = task['entry']
+                images_data = task['images']
+                filenames = task['filenames']
                 print(f"🔄 [處理中] {entry.get('班級')} | {entry.get('評分項目')}")
 
                 drive_links = []
-
-                if image_paths:
-                    # 走「檔案路徑」版本：從本機讀檔上傳，完成後會刪掉暫存檔
-                    for path, fname in zip(image_paths, filenames):
-                        if not path or not os.path.exists(path):
-                            print(f"⚠️ 找不到暫存檔：{path}")
-                            drive_links.append("UPLOAD_FAILED")
-                            continue
-                        try:
-                            with open(path, "rb") as f:
-                                link = upload_image_to_drive(f, fname)
-                            drive_links.append(link if link else "UPLOAD_FAILED")
-                        except Exception as e:
-                            print(f"⚠️ 上傳暫存檔失敗 {path}: {e}")
-                            drive_links.append("UPLOAD_FAILED")
-                elif images_data:
-                    # 相容舊佇列資料：還是用記憶體 bytes
+                if images_data:
                     for img_bytes, fname in zip(images_data, filenames):
-                        try:
-                            link = upload_image_to_drive(io.BytesIO(img_bytes), fname)
-                            drive_links.append(link if link else "UPLOAD_FAILED")
-                        except Exception as e:
-                            print(f"⚠️ 上傳記憶體圖片失敗: {e}")
-                            drive_links.append("UPLOAD_FAILED")
-
-                if drive_links:
+                        link = upload_image_to_drive(io.BytesIO(img_bytes), fname)
+                        drive_links.append(link if link else "UPLOAD_FAILED")
                     entry["照片路徑"] = ";".join(drive_links)
 
                 ws = get_worksheet(SHEET_TABS["main"])
                 if ws:
-                    if not ws.get_all_values():
-                        ws.append_row(EXPECTED_COLUMNS)
+                    if not ws.get_all_values(): ws.append_row(EXPECTED_COLUMNS)
                     row = []
                     for col in EXPECTED_COLUMNS:
                         val = entry.get(col, "")
-                        if isinstance(val, bool):
-                            val = str(val).upper()
-                        if col == "日期":
-                            val = str(val)
+                        if isinstance(val, bool): val = str(val).upper()
+                        if col == "日期": val = str(val)
                         row.append(val)
                     ws.append_row(row)
                     print(f"✅ [寫入成功] {entry.get('班級')}")
-                    time.sleep(1.5)  # Rate Limit，避免打爆 API
-                else:
-                    print("❌ 無法取得 Worksheet")
+                    time.sleep(1.5) # Rate Limit
+                else: print("❌ 無法取得 Worksheet")
             except Exception as e:
-                print(f"⚠️ 背景錯誤: {e}")
-                traceback.print_exc()
-            finally:
-                # 不管成功或失敗，都試著刪掉暫存檔，避免硬碟累積垃圾
-                try:
-                    for path in task.get('image_paths', []) or []:
-                        if path and os.path.exists(path):
-                            os.remove(path)
-                except Exception as cleanup_e:
-                    print(f"⚠️ 刪除暫存檔失敗: {cleanup_e}")
-                q.task_done()
+                print(f"⚠️ 背景錯誤: {e}"); traceback.print_exc()
+            finally: q.task_done()
 
     @st.cache_resource
     def start_background_thread():
@@ -261,56 +214,20 @@ try:
             st.error(f"讀取資料錯誤: {e}"); return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
     def save_entry(new_entry, uploaded_files=None):
-        """
-        接受前端送進來的評分紀錄：
-        - 上傳的圖片先寫到本機暫存資料夾 IMG_DIR
-        - 佇列裡只放「檔案路徑 + 檔名」，減少記憶體壓力
-        - 背景 worker 再負責真正上傳到 Google Drive + 寫入試算表
-        """
-        image_paths = []
+        images_bytes = []
         file_names = []
-
         if uploaded_files:
             for i, up_file in enumerate(uploaded_files):
-                if not up_file:
-                    continue
-                try:
-                    up_file.seek(0)
-                    data = up_file.read()
-                except Exception as e:
-                    print(f"⚠️ 讀取上傳檔失敗: {e}")
-                    continue
-
-                if not data:
-                    continue
-
-                # 給這張照片一個穩定的對外檔名（上傳到 Drive 用）
-                logical_fname = f"{new_entry['日期']}_{new_entry['班級']}_{i}.jpg"
-
-                # 實際在本機暫存的檔名加上 timestamp + uuid，避免撞名
-                tmp_fname = f"{datetime.now(TW_TZ).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}_{logical_fname}"
-                local_path = os.path.join(IMG_DIR, tmp_fname)
-
-                try:
-                    with open(local_path, "wb") as f:
-                        f.write(data)
-                    image_paths.append(local_path)
-                    file_names.append(logical_fname)
-                except Exception as e:
-                    print(f"⚠️ 寫入暫存檔失敗: {e}")
-                    # 這張失敗就略過，不中斷其它檔案
-
-        # 確保每筆紀錄都有唯一紀錄ID（方便後台與申訴對應）
-        if "紀錄ID" not in new_entry or not new_entry["紀錄ID"]:
+                up_file.seek(0)
+                images_bytes.append(up_file.read())
+                file_names.append(f"{new_entry['日期']}_{new_entry['班級']}_{i}.jpg")
+        
+        if "紀錄ID" not in new_entry:
             unique_suffix = uuid.uuid4().hex[:6]
             timestamp = datetime.now(TW_TZ).strftime("%Y%m%d%H%M%S")
             new_entry["紀錄ID"] = f"{timestamp}_{unique_suffix}"
 
-        task = {
-            'entry': new_entry,
-            'image_paths': image_paths,   # 改成路徑
-            'filenames': file_names       # Drive 上的檔名
-        }
+        task = {'entry': new_entry, 'images': images_bytes, 'filenames': file_names}
         get_task_queue().put(task)
         st.cache_data.clear()
         print(f"📥 排入佇列 (Queue Size: {get_task_queue().qsize()})")
@@ -939,5 +856,3 @@ try:
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
-
-
