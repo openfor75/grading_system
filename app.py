@@ -413,125 +413,143 @@ try:
     @st.cache_data(ttl=60)
     def load_main_data():
         ws = get_worksheet(SHEET_TABS["main"])
-        if not ws: return pd.DataFrame(columns=EXPECTED_COLUMNS)
+        if not ws:
+            return pd.DataFrame(columns=EXPECTED_COLUMNS)
         try:
             data = ws.get_all_records()
             df = pd.DataFrame(data)
-            if df.empty: return pd.DataFrame(columns=EXPECTED_COLUMNS)
-            for col in EXPECTED_COLUMNS:
-                if col not in df.columns: df[col] = "" 
-            
-            if "紀錄ID" not in df.columns: df["紀錄ID"] = df.index.astype(str)
-            else: df["紀錄ID"] = df["紀錄ID"].astype(str)
+            if df.empty:
+                return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
-            if "照片路徑" in df.columns: df["照片路徑"] = df["照片路徑"].fillna("").astype(str)
-            
+            # 確保所有欄位存在
+            for col in EXPECTED_COLUMNS:
+                if col not in df.columns:
+                    df[col] = ""
+
+            # 確保紀錄ID存在且為字串
+            if "紀錄ID" not in df.columns:
+                df["紀錄ID"] = df.index.astype(str)
+            else:
+                df["紀錄ID"] = df["紀錄ID"].astype(str)
+
+            # 照片路徑處理
+            if "照片路徑" in df.columns:
+                df["照片路徑"] = df["照片路徑"].fillna("").astype(str)
+
+            # 數值欄位轉型
             numeric_cols = ["內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數"]
             for col in numeric_cols:
-                if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-            if "週次" in df.columns: df["週次"] = pd.to_numeric(df["週次"], errors='coerce').fillna(0).astype(int)
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+            if "週次" in df.columns:
+                df["週次"] = pd.to_numeric(df["週次"], errors="coerce").fillna(0).astype(int)
+
             return df[EXPECTED_COLUMNS]
         except Exception as e:
-            st.error(f"讀取資料錯誤: {e}"); return pd.DataFrame(columns=EXPECTED_COLUMNS)
+            st.error(f"讀取資料錯誤: {e}")
+            return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
-        def save_entry(new_entry, uploaded_files=None):
-            """
-            接受前端送進來的評分紀錄：
-            - 上傳的圖片先寫到本機暫存資料夾 IMG_DIR
-            - 佇列裡只放「檔案路徑 + 檔名」與 entry，避免記憶體壓力
-            - 背景 worker 再負責上傳到 Google Drive + 寫入試算表 (main_data)
-            """
-            image_paths = []
-            file_names = []
 
-            if uploaded_files:
-                for i, up_file in enumerate(uploaded_files):
-                    if not up_file:
-                        continue
-                    try:
-                        up_file.seek(0)
-                        data = up_file.read()
-                    except Exception as e:
-                        print(f"⚠️ 讀取上傳檔失敗: {e}")
-                        continue
+    def save_entry(new_entry, uploaded_files=None):
+        """
+        前端評分送進來：
+        - 圖片寫到本機暫存資料夾 IMG_DIR
+        - 佇列只放 entry + 檔案路徑
+        - 背景 worker 負責上傳 Drive + 寫 main_data
+        """
+        image_paths = []
+        file_names = []
 
-                    if not data:
-                        continue
-
-                    # 檔案大小限制 10MB
-                    size = len(data)
-                    if size > MAX_IMAGE_BYTES:
-                        mb = size / (1024 * 1024)
-                        st.warning(f"📸 檔案「{up_file.name}」過大 ({mb:.1f} MB)，已略過。單檔上限為 10 MB。")
-                        continue
-
-                    logical_fname = f"{new_entry['日期']}_{new_entry['班級']}_{i}.jpg"
-                    tmp_fname = f"{datetime.now(TW_TZ).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}_{logical_fname}"
-                    local_path = os.path.join(IMG_DIR, tmp_fname)
-
-                    try:
-                        with open(local_path, "wb") as f:
-                            f.write(data)
-                        image_paths.append(local_path)
-                        file_names.append(logical_fname)
-                    except Exception as e:
-                        print(f"⚠️ 寫入暫存檔失敗: {e}")
-                        # 這張失敗就略過，不中斷其它檔案
-
-            # 確保每筆紀錄都有唯一紀錄ID（方便後台與申訴對應）
-            if "紀錄ID" not in new_entry or not new_entry["紀錄ID"]:
-                unique_suffix = uuid.uuid4().hex[:6]
-                timestamp = datetime.now(TW_TZ).strftime("%Y%m%d%H%M%S")
-                new_entry["紀錄ID"] = f"{timestamp}_{unique_suffix}"
-
-            payload = {
-                "entry": new_entry,
-                "image_paths": image_paths,
-                "filenames": file_names,
-            }
-            task_id = enqueue_task("main_entry", payload)
-            try:
-                st.cache_data.clear()
-            except Exception:
-                pass
-            print(f"📥 main_entry 排入佇列 (Task ID: {task_id})")
-
-        def save_appeal(entry, proof_file=None):
-            """
-            申訴資料寫入流程：
-            - 前端只做：檢查欄位 + 檔案大小 + 寫暫存檔 + 丟到 SQLite queue
-            - 背景 worker：上傳佐證照片到 Drive + 寫入 appeals 分頁
-            """
-            image_info = None  # {"path": ..., "filename": ...}
-
-            if proof_file:
+        if uploaded_files:
+            for i, up_file in enumerate(uploaded_files):
+                if not up_file:
+                    continue
                 try:
-                    proof_file.seek(0)
-                    data = proof_file.read()
+                    up_file.seek(0)
+                    data = up_file.read()
                 except Exception as e:
-                    st.error(f"❌ 讀取佐證照片失敗: {e}")
-                    return False
+                    print(f"⚠️ 讀取上傳檔失敗: {e}")
+                    continue
 
                 if not data:
-                    st.error("❌ 佐證照片為空檔案")
-                    return False
+                    continue
 
+                # 檔案大小限制 10MB
                 size = len(data)
                 if size > MAX_IMAGE_BYTES:
                     mb = size / (1024 * 1024)
-                    st.error(f"❌ 佐證照片過大 ({mb:.1f} MB)，請壓縮到 10 MB 以下再上傳。(目前 {mb:.1f} MB)")
-                    return False
+                    st.warning(f"📸 檔案「{up_file.name}」過大 ({mb:.1f} MB)，已略過。單檔上限為 10 MB。")
+                    continue
 
-                logical_fname = f"Appeal_{entry.get('班級', '')}_{datetime.now(TW_TZ).strftime('%H%M%S')}.jpg"
+                logical_fname = f"{new_entry['日期']}_{new_entry['班級']}_{i}.jpg"
                 tmp_fname = f"{datetime.now(TW_TZ).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}_{logical_fname}"
                 local_path = os.path.join(IMG_DIR, tmp_fname)
+
                 try:
                     with open(local_path, "wb") as f:
                         f.write(data)
-                    image_info = {"path": local_path, "filename": logical_fname}
+                    image_paths.append(local_path)
+                    file_names.append(logical_fname)
                 except Exception as e:
-                    st.error(f"❌ 寫入佐證暫存檔失敗: {e}")
-                    return False
+                    print(f"⚠️ 寫入暫存檔失敗: {e}")
+                    # 這張失敗就略過，不中斷其它檔案
+
+        # 確保紀錄ID存在（申訴對應會用到）
+        if "紀錄ID" not in new_entry or not new_entry["紀錄ID"]:
+            unique_suffix = uuid.uuid4().hex[:6]
+            timestamp = datetime.now(TW_TZ).strftime("%Y%m%d%H%M%S")
+            new_entry["紀錄ID"] = f"{timestamp}_{unique_suffix}"
+
+        payload = {
+            "entry": new_entry,
+            "image_paths": image_paths,
+            "filenames": file_names,
+        }
+        task_id = enqueue_task("main_entry", payload)
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        print(f"📥 main_entry 排入佇列 (Task ID: {task_id})")
+
+
+    def save_appeal(entry, proof_file=None):
+        """
+        申訴資料寫入流程：
+        - 前端：檢查欄位 + 10MB 限制 + 寫暫存檔 + 丟 SQLite queue
+        - 背景 worker：上傳佐證照片到 Drive + 寫入 appeals 分頁
+        """
+        image_info = None  # {"path": ..., "filename": ...}
+
+        if proof_file:
+            try:
+                proof_file.seek(0)
+                data = proof_file.read()
+            except Exception as e:
+                st.error(f"❌ 讀取佐證照片失敗: {e}")
+                return False
+
+            if not data:
+                st.error("❌ 佐證照片為空檔案")
+                return False
+
+            size = len(data)
+            if size > MAX_IMAGE_BYTES:
+                mb = size / (1024 * 1024)
+                st.error(f"❌ 佐證照片過大 ({mb:.1f} MB)，請壓縮到 10 MB 以下再上傳。(目前 {mb:.1f} MB)")
+                return False
+
+            logical_fname = f"Appeal_{entry.get('班級', '')}_{datetime.now(TW_TZ).strftime('%H%M%S')}.jpg"
+            tmp_fname = f"{datetime.now(TW_TZ).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}_{logical_fname}"
+            local_path = os.path.join(IMG_DIR, tmp_fname)
+            try:
+                with open(local_path, "wb") as f:
+                    f.write(data)
+                image_info = {"path": local_path, "filename": logical_fname}
+            except Exception as e:
+                st.error(f"❌ 寫入佐證暫存檔失敗: {e}")
+                return False
 
         # 預設欄位補齊
         if "申訴日期" not in entry or not entry["申訴日期"]:
@@ -543,7 +561,7 @@ try:
             entry["申訴ID"] = datetime.now(TW_TZ).strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:4]
         if "佐證照片" not in entry:
             entry["佐證照片"] = ""
-    
+
         payload = {
             "entry": entry,
             "image_file": image_info,  # 可能為 None
@@ -556,6 +574,7 @@ try:
         st.success("📩 申訴已排入背景處理")
         print(f"📥 appeal_entry 排入佇列 (Task ID: {task_id})")
         return True
+
 
     @st.cache_data(ttl=60)
     def load_appeals():
@@ -572,7 +591,6 @@ try:
         # 確保所有定義好的欄位都存在
         for col in APPEAL_COLUMNS:
             if col not in df.columns:
-                # 對「處理狀態」給合理預設，其餘給空字串
                 if col == "處理狀態":
                     df[col] = "待處理"
                 else:
@@ -582,6 +600,7 @@ try:
         df = df[APPEAL_COLUMNS]
 
         return df
+
     def delete_rows_by_ids(record_ids_to_delete):
         ws = get_worksheet(SHEET_TABS["main"])
         if not ws: return False
@@ -1188,6 +1207,7 @@ try:
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+
 
 
 
