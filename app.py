@@ -1206,7 +1206,9 @@ try:
         else: st.error("密碼錯誤")
 
 except Exception as e:
-    st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+    st.error("❌ 系統發生未預期錯誤，請通知管理員。")
+    print(traceback.format_exc())  # 寫到 log 就好
+
 
 
 
