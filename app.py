@@ -555,7 +555,7 @@ try:
             pass
         st.success("📩 申訴已排入背景處理")
         print(f"📥 appeal_entry 排入佇列 (Task ID: {task_id})")
-    return True
+        return True
 
     @st.cache_data(ttl=60)
     def load_appeals():
@@ -1188,6 +1188,7 @@ try:
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+
 
 
 
