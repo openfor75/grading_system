@@ -7,8 +7,8 @@ import io
 import traceback
 import queue
 import threading
-import uuid  # Fix 4: 引入 UUID
-import re    # Fix 1: 用於解析班級數字
+import uuid
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
@@ -106,12 +106,10 @@ try:
                 else: print(f"❌ 讀取分頁 '{tab_name}' 失敗: {e}"); return None
         return None
 
-    # --- Fix 2: Google Drive 上傳邏輯 (從 secrets 讀取 ID) ---
     def upload_image_to_drive(file_obj, filename):
         service = get_drive_service()
         if not service: return None
         
-        # 從 secrets 讀取 ID，若無則使用預設(或報錯)
         folder_id = st.secrets["system_config"].get("drive_folder_id")
         if not folder_id:
             print("⚠️ Secrets 中未設定 drive_folder_id")
@@ -202,13 +200,11 @@ try:
             for col in EXPECTED_COLUMNS:
                 if col not in df.columns: df[col] = "" 
             
-            # 確保 ID 欄位存在
             if "紀錄ID" not in df.columns: df["紀錄ID"] = df.index.astype(str)
             else: df["紀錄ID"] = df["紀錄ID"].astype(str)
 
             if "照片路徑" in df.columns: df["照片路徑"] = df["照片路徑"].fillna("").astype(str)
             
-            # 數值轉換
             numeric_cols = ["內掃原始分", "外掃原始分", "垃圾原始分", "晨間打掃原始分", "手機人數"]
             for col in numeric_cols:
                 if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
@@ -226,7 +222,6 @@ try:
                 images_bytes.append(up_file.read())
                 file_names.append(f"{new_entry['日期']}_{new_entry['班級']}_{i}.jpg")
         
-        # Fix 4: ID 加上 UUID 後綴，避免碰撞
         if "紀錄ID" not in new_entry:
             unique_suffix = uuid.uuid4().hex[:6]
             timestamp = datetime.now(TW_TZ).strftime("%Y%m%d%H%M%S")
@@ -257,35 +252,25 @@ try:
         try: return pd.DataFrame(ws.get_all_records())
         except: return pd.DataFrame(columns=APPEAL_COLUMNS)
 
-    # --- Fix 3: 移除 Overwrite，改用 Index Deletion (Append/Delete Only) ---
     def delete_rows_by_ids(record_ids_to_delete):
-        """根據 RecordID 反查 Row Index 並進行刪除 (避免整表覆寫)"""
         ws = get_worksheet(SHEET_TABS["main"])
         if not ws: return False
         try:
-            # 1. 取得所有資料 (為了找 ID 對應的 Row)
-            # 注意：Google Sheet Row 從 1 開始，Header 是 Row 1，數據從 Row 2 開始
             records = ws.get_all_records()
-            
-            # 找出要刪除的 Row Index (Physical Row Number)
             rows_to_delete = []
             for i, record in enumerate(records):
-                # enumerate 0 -> Sheet Row 2
                 if str(record.get("紀錄ID")) in record_ids_to_delete:
                     rows_to_delete.append(i + 2)
             
-            # 2. 從後面往前刪 (避免 Index Shift)
             rows_to_delete.sort(reverse=True)
-            
             for row_idx in rows_to_delete:
-                ws.delete_rows(row_idx) # gspread 支援 delete_rows
-                time.sleep(0.8) # 稍微限速避免 API 報錯
+                ws.delete_rows(row_idx)
+                time.sleep(0.8)
                 
             st.cache_data.clear()
             return True
         except Exception as e:
-            st.error(f"刪除失敗: {e}")
-            return False
+            st.error(f"刪除失敗: {e}"); return False
 
     def update_appeal_status(appeal_row_idx, status, record_id):
         ws_appeals = get_worksheet(SHEET_TABS["appeals"])
@@ -331,42 +316,29 @@ try:
             except: pass
         return roster_dict
         
-    # --- Fix 1: 從 Roster 動態載入班級並排序 ---
     @st.cache_data(ttl=3600)
     def load_sorted_classes():
-        """從 Roster 讀取班級，並依照 1年級 -> 2年級 -> 3年級 排序"""
         ws = get_worksheet(SHEET_TABS["roster"])
         if not ws: return [], []
-        
         try:
             df = pd.DataFrame(ws.get_all_records())
             class_col = next((c for c in df.columns if "班級" in c), None)
             if not class_col: return [], []
-            
-            # 取得唯一班級列表
             unique_classes = df[class_col].dropna().unique().tolist()
             unique_classes = [c.strip() for c in unique_classes if c.strip()]
             
-            # 定義排序 Key: 抓取字串中的數字，若無數字則排最後
             def sort_key(name):
                 match = re.search(r'\d+', name)
                 grade = int(match.group()) if match else 99
-                return (grade, name) # 先比年級，再比班級名稱
+                return (grade, name)
             
             sorted_all = sorted(unique_classes, key=sort_key)
-            
-            # 建構結構化選單 (Grade -> List of Classes)
             structured = []
-            seen_grades = set()
             for c in sorted_all:
                 match = re.search(r'\d+', c)
                 g_num = match.group() if match else "?"
-                if g_num != "?":
-                    g_label = f"{g_num}年級"
-                else:
-                    g_label = "其他"
+                g_label = f"{g_num}年級" if g_num != "?" else "其他"
                 structured.append({"grade": g_label, "name": c})
-            
             return sorted_all, structured
         except: return [], []
 
@@ -469,23 +441,16 @@ try:
             except: return False
         return False
 
-    # --- Fix 5: 優化 Email 寄送 (Batch Send) ---
     def send_bulk_emails(email_list):
-        """
-        email_list: list of dict {'email': '...', 'subject': '...', 'body': '...'}
-        使用單一 SMTP 連線寄送大量信件
-        """
         sender_email = st.secrets["system_config"]["smtp_email"]
         sender_password = st.secrets["system_config"]["smtp_password"]
         if not sender_email or not sender_password: return 0, "Secrets 未設定 Email"
 
         sent_count = 0
         try:
-            # 建立一次連線
             server = smtplib.SMTP('smtp.gmail.com', 587)
             server.starttls()
             server.login(sender_email, sender_password)
-            
             for item in email_list:
                 try:
                     msg = MIMEMultipart()
@@ -497,8 +462,7 @@ try:
                     sent_count += 1
                 except Exception as inner_e:
                     print(f"個別寄送失敗: {inner_e}")
-            
-            server.quit() # 最後再斷線
+            server.quit()
             return sent_count, "發送作業結束"
         except Exception as e:
             return sent_count, str(e)
@@ -521,10 +485,8 @@ try:
     INSPECTOR_LIST = load_inspector_list()
     TEACHER_MAILS = load_teacher_emails()
     
-    # 初始化班級列表 (動態)
     all_classes, structured_classes = load_sorted_classes()
     if not all_classes:
-        # Fallback 防止 roster 沒資料時崩潰
         all_classes = ["測試班級"]
         structured_classes = [{"grade": "其他", "name": "測試班級"}]
 
@@ -713,7 +675,8 @@ try:
                 all_classes_df = pd.DataFrame(all_classes, columns=["班級"])
                 if not df.empty:
                     valid_weeks = sorted(df[df["週次"]>0]["週次"].unique())
-                    selected_weeks = st.multiselect("選擇週次", valid_weeks, default=valid_weeks[-1:] if valid_weeks else [])
+                    # [Fix]: Added key='week_select_summary' to avoid ID collision
+                    selected_weeks = st.multiselect("選擇週次", valid_weeks, default=valid_weeks[-1:] if valid_weeks else [], key='week_select_summary')
                     if selected_weeks:
                         wdf = df[df["週次"].isin(selected_weeks)].copy()
                         daily_agg = wdf.groupby(["日期", "班級"]).agg({
@@ -747,7 +710,8 @@ try:
                 df = load_main_data()
                 if not df.empty:
                     valid_weeks = sorted(df[df["週次"]>0]["週次"].unique())
-                    s_weeks = st.multiselect("選擇週次", valid_weeks, default=valid_weeks[-1:] if valid_weeks else [])
+                    # [Fix]: Added key='week_select_detail' to avoid ID collision
+                    s_weeks = st.multiselect("選擇週次", valid_weeks, default=valid_weeks[-1:] if valid_weeks else [], key='week_select_detail')
                     if s_weeks:
                         detail_df = df[df["週次"].isin(s_weeks)].copy()
                         detail_df["該筆扣分"] = detail_df["內掃原始分"] + detail_df["外掃原始分"] + detail_df["垃圾原始分"] + detail_df["晨間打掃原始分"] + detail_df["手機人數"]
@@ -847,7 +811,8 @@ try:
                     if del_mode == "單筆刪除":
                         df_display = df.sort_values("登錄時間", ascending=False).head(50)
                         opts = {r['紀錄ID']: f"{r['日期']} | {r['班級']} | {r['評分項目']} (ID:{r['紀錄ID']})" for _, r in df_display.iterrows()}
-                        sel_ids = st.multiselect("選擇要刪除的紀錄", list(opts.keys()), format_func=lambda x: opts[x])
+                        # [Fix]: Added key='del_multiselect' to avoid ID collision
+                        sel_ids = st.multiselect("選擇要刪除的紀錄", list(opts.keys()), format_func=lambda x: opts[x], key='del_multiselect')
                         if st.button("🗑️ 確認刪除"):
                             if delete_rows_by_ids(sel_ids): st.success("刪除成功"); st.rerun()
                     elif del_mode == "日期區間刪除":
