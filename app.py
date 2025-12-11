@@ -334,23 +334,36 @@ try:
                 st.error(f"❌ 讀取佐證照片失敗: {e}")
                 return False
 
-            # 檢查 10MB 限制
-            if len(data) > MAX_IMAGE_BYTES:
-                mb = len(data) / (1024 * 1024)
-                st.error(f"❌ 佐證照片過大 ({mb:.1f} MB)，請壓縮到 10MB 以下再上傳。")
-                return False
+            if not data:
+                st.error("❌ 佐證照片為空檔案")
+            else:
+                # 如果你有 MAX_IMAGE_BYTES 的大小限制，可以在這裡檢查：
+                # if len(data) > MAX_IMAGE_BYTES:
+                #     mb = len(data) / (1024 * 1024)
+                #     st.error(f"❌ 佐證照片過大 ({mb:.1f} MB)，請壓縮到 10MB 以下再上傳。")
+                #     return False
 
-            fname = f"Appeal_{entry.get('班級','')}_{datetime.now().strftime('%H%M%S')}.jpg"
-            proof_io = io.BytesIO(data)
-            link = upload_image_to_drive(proof_io, fname)
-            entry["佐證照片"] = link if link else "UPLOAD_FAILED"
+                fname = f"Appeal_{entry.get('班級','')}_{datetime.now().strftime('%H%M%S')}.jpg"
+                proof_io = io.BytesIO(data)
+                link = upload_image_to_drive(proof_io, fname)
+                entry["佐證照片"] = link if link else "UPLOAD_FAILED"
         else:
-            entry["佐證照片"] = ""
+            entry["佐證照片"] = entry.get("佐證照片", "")
 
-        # ★ 新增預設欄位：處理狀態 ★
+        # ★★★ 補上申訴的相關欄位預設值 ★★★
+        # 申訴日期：預設今天
+        if "申訴日期" not in entry or not entry["申訴日期"]:
+            entry["申訴日期"] = datetime.now(TW_TZ).strftime("%Y-%m-%d")
+        # 處理狀態：預設為「待處理」
         entry["處理狀態"] = entry.get("處理狀態", "待處理")
+        # 登錄時間：預設現在時間
+        if "登錄時間" not in entry or not entry["登錄時間"]:
+            entry["登錄時間"] = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        # 申訴ID：如果有需要，也可以在這裡補一個唯一值
+        if "申訴ID" not in entry or not entry["申訴ID"]:
+            entry["申訴ID"] = datetime.now(TW_TZ).strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:4]
 
-        # 依照定義欄位順序輸出
+        # 依照 APPEAL_COLUMNS 順序輸出
         row = [str(entry.get(col, "")) for col in APPEAL_COLUMNS]
 
         try:
@@ -973,6 +986,7 @@ try:
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+
 
 
 
