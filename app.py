@@ -13,7 +13,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 1. 網頁設定 (必須放第一行) ---
-st.set_page_config(page_title="衛生糾察評分系統(修正版)", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="衛生糾察評分系統(專業版)", layout="wide", page_icon="🧹")
 
 # --- 2. 捕捉全域錯誤 (防止 Oh no 畫面) ---
 try:
@@ -36,7 +36,7 @@ try:
         "appeals": "appeals"        # 申訴紀錄
     }
 
-    # 暫存圖片路徑 (確保資料夾存在)
+    # 暫存圖片路徑
     IMG_DIR = "evidence_photos"
     if not os.path.exists(IMG_DIR):
         os.makedirs(IMG_DIR)
@@ -133,7 +133,6 @@ try:
                 if col not in df.columns: 
                     df[col] = "" 
             
-            # 紀錄ID處理
             if "紀錄ID" not in df.columns:
                 df["紀錄ID"] = df.index.astype(str)
             else:
@@ -142,7 +141,7 @@ try:
                     if df.at[idx, "紀錄ID"] == "":
                          df.at[idx, "紀錄ID"] = f"AUTO_{idx}"
 
-            # 強制將照片路徑轉為字串，避免 NaN 錯誤
+            # 強制將照片路徑轉為字串
             if "照片路徑" in df.columns:
                 df["照片路徑"] = df["照片路徑"].fillna("").astype(str)
 
@@ -514,7 +513,7 @@ try:
                                 save_entry({"日期": input_date, "週次": week_num, "檢查人員": inspector_name, "登錄時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), "修正": is_fix, "班級": selected_class, "評分項目": role, "內掃原始分": in_s, "外掃原始分": out_s, "手機人數": ph_c, "備註": note, "照片路徑": path_str})
                                 st.toast(f"✅ 已儲存：{selected_class}"); st.rerun()
 
-    # --- 模式2: 衛生股長 (修正照片顯示) ---
+    # --- 模式2: 衛生股長 ---
     elif app_mode == "我是班上衛生股長":
         st.title("🔎 班級查詢 & 違規申訴")
         df = load_main_data()
@@ -538,16 +537,19 @@ try:
                         st.write(f"📝 說明: {r['備註']}")
                         st.caption(f"檢查人員: {r['檢查人員']}")
                         
-                        # --- 修正照片顯示邏輯 (除錯用) ---
+                        # --- 修改重點：修復照片 caption 數量不一致問題 ---
                         raw_photo_path = str(r.get("照片路徑", "")).strip()
                         if raw_photo_path and raw_photo_path.lower() != "nan":
                             path_list = [p.strip() for p in raw_photo_path.split(";") if p.strip()]
                             valid_photos = [p for p in path_list if os.path.exists(p)]
                             
                             if valid_photos:
-                                st.image(valid_photos, caption="違規照片", width=300)
+                                # 修正：產生一個跟照片數量一樣長的 list 給 caption
+                                captions = [f"違規照片 ({i+1})" for i in range(len(valid_photos))]
+                                st.image(valid_photos, caption=captions, width=300)
                             else:
-                                st.warning(f"⚠️ 有照片紀錄但檔案已從伺服器清除 (路徑: {path_list})")
+                                if path_list:
+                                    st.warning("⚠️ 照片檔案已過期或被移除")
                         # -----------------------------
 
                         if total_raw > 2 and r['晨間打掃原始分'] == 0:
@@ -602,12 +604,15 @@ try:
         pwd = st.text_input("管理密碼", type="password")
         
         if pwd == st.secrets["system_config"]["admin_password"]:
-            # --- 確保這裡有 7 個項目，並且 unpack 給 7 個變數 ---
-            tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 成績報表", "📧 寄送通知", "🛠️ 資料刪除", "📅 設定", "📄 名單管理", "📣 申訴管理", "🧹 晨掃管理"])
+            # --- 修正重點：確保這裡有 7 個項目，並且縮排正確 ---
+            tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+                "📊 成績總表", "📝 詳細明細(新)", "📧 寄送通知", 
+                "🛠️ 資料刪除", "📅 設定", "📄 名單管理", "🧹 晨掃管理"
+            ])
             
-            # 1. 成績報表
+            # 1. 成績總表 (優化版)
             with tab1:
-                st.subheader("成績報表")
+                st.subheader("成績排行榜與總表")
                 st.caption("計算規則：內掃/外掃/垃圾 每日上限扣2分 | 手機與晨掃無上限")
                 df = load_main_data()
                 all_classes_df = pd.DataFrame(all_classes, columns=["班級"])
@@ -618,11 +623,14 @@ try:
                     
                     if selected_weeks:
                         wdf = df[df["週次"].isin(selected_weeks)].copy()
+                        
+                        # 進階統計：計算各項目的扣分 (方便老師看是哪個項目最差)
                         daily_agg = wdf.groupby(["日期", "班級"]).agg({
                             "內掃原始分": "sum", "外掃原始分": "sum", "垃圾原始分": "sum",
                             "晨間打掃原始分": "sum", "手機人數": "sum"
                         }).reset_index()
 
+                        # 應用每日上限規則
                         daily_agg["內掃結算"] = daily_agg["內掃原始分"].apply(lambda x: min(x, 2))
                         daily_agg["外掃結算"] = daily_agg["外掃原始分"].apply(lambda x: min(x, 2))
                         daily_agg["垃圾結算"] = daily_agg["垃圾原始分"].apply(lambda x: min(x, 2))
@@ -630,26 +638,57 @@ try:
                         daily_agg["每日總扣分"] = (daily_agg["內掃結算"] + daily_agg["外掃結算"] + 
                                                  daily_agg["垃圾結算"] + daily_agg["晨間打掃原始分"] + daily_agg["手機人數"])
 
-                        violation_report = daily_agg.groupby("班級")["每日總扣分"].sum().reset_index()
-                        violation_report.columns = ["班級", "總扣分"]
+                        # 依班級加總 (Pivot View)
+                        violation_report = daily_agg.groupby("班級").agg({
+                            "內掃結算": "sum", "外掃結算": "sum", "垃圾結算": "sum",
+                            "晨間打掃原始分": "sum", "手機人數": "sum", "每日總扣分": "sum"
+                        }).reset_index()
                         
-                        final_report = pd.merge(all_classes_df, violation_report, on="班級", how="left")
-                        final_report["總扣分"] = final_report["總扣分"].fillna(0)
+                        violation_report.columns = ["班級", "內掃扣分", "外掃扣分", "垃圾扣分", "晨掃扣分", "手機扣分", "總扣分"]
+                        
+                        final_report = pd.merge(all_classes_df, violation_report, on="班級", how="left").fillna(0)
                         final_report["總成績"] = 90 - final_report["總扣分"]
                         final_report = final_report.sort_values("總成績", ascending=False)
                         
-                        try:
-                            st.dataframe(final_report.style.format("{:.0f}").background_gradient(cmap="RdYlGn", subset=["總成績"], vmin=60, vmax=90))
-                        except:
-                            st.dataframe(final_report)
+                        st.dataframe(
+                            final_report.style.format("{:.0f}")
+                            .background_gradient(cmap="RdYlGn", subset=["總成績"], vmin=60, vmax=90)
+                            .bar(subset=["總扣分"], color='#FFA07A')
+                        )
                         
                         csv = final_report.to_csv(index=False).encode('utf-8-sig')
-                        st.download_button("📥下載統計報表(CSV)", csv, f"report_weeks_{selected_weeks}.csv")
+                        st.download_button("📥 下載總成績表 (CSV)", csv, f"summary_report_weeks_{selected_weeks}.csv")
                     else: st.info("請選擇週次")
                 else: st.warning("無資料")
-                
-            # 2. 寄送通知
+
+            # 2. 詳細明細 (新功能)
             with tab2:
+                st.subheader("📝 違規詳細流水帳")
+                st.caption("這裡列出每一筆被扣分的詳細原因，方便開會檢討。")
+                df = load_main_data()
+                if not df.empty:
+                    valid_weeks = sorted(df[df["週次"]>0]["週次"].unique())
+                    s_weeks = st.multiselect("選擇週次 (明細)", valid_weeks, default=valid_weeks[-1:] if valid_weeks else [])
+                    if s_weeks:
+                        # 篩選並整理欄位
+                        detail_df = df[df["週次"].isin(s_weeks)].copy()
+                        # 計算該筆紀錄的總扣分 (原始)
+                        detail_df["該筆扣分"] = detail_df["內掃原始分"] + detail_df["外掃原始分"] + detail_df["垃圾原始分"] + detail_df["晨間打掃原始分"] + detail_df["手機人數"]
+                        # 只顯示有扣分的項目
+                        detail_df = detail_df[detail_df["該筆扣分"] > 0]
+                        
+                        display_cols = ["日期", "班級", "評分項目", "該筆扣分", "備註", "檢查人員", "違規細項"]
+                        detail_df = detail_df[display_cols].sort_values(["日期", "班級"])
+                        
+                        st.dataframe(detail_df, use_container_width=True)
+                        
+                        csv_detail = detail_df.to_csv(index=False).encode('utf-8-sig')
+                        st.download_button("📥 下載詳細違規紀錄 (CSV)", csv_detail, f"detail_log_weeks_{s_weeks}.csv")
+                    else: st.info("請選擇週次")
+                else: st.info("無資料")
+
+            # 3. 寄送通知
+            with tab3:
                 st.subheader("📧 每日違規通知")
                 target_date = st.date_input("選擇日期", today_tw)
                 if "mail_preview" not in st.session_state: st.session_state.mail_preview = None
@@ -698,8 +737,8 @@ try:
                             bar.progress((idx + 1) / total)
                         st.success(f"✅ 寄送完成！成功寄出 {success_count} 封。"); st.session_state.mail_preview = None
 
-            # 3. 資料刪除
-            with tab3:
+            # 4. 資料刪除
+            with tab4:
                 st.subheader("🛠️ 資料刪除")
                 df = load_main_data()
                 if not df.empty:
@@ -722,21 +761,29 @@ try:
                             else: st.warning("區間無資料")
                 else: st.info("無資料")
 
-            # 4. 設定
-            with tab4:
+            # 5. 設定
+            with tab5:
                 st.subheader("系統設定")
                 curr = SYSTEM_CONFIG.get("semester_start", "2025-08-25")
                 nd = st.date_input("開學日", datetime.strptime(curr, "%Y-%m-%d").date())
                 if st.button("更新開學日"): save_setting("semester_start", str(nd)); st.success("已更新")
                     
-            # 5. 名單說明
-            with tab5:
+            # 6. 名單說明
+            with tab6:
                 st.info("請至 Google Sheets 修改：roster, inspectors, duty, teachers, appeals")
                 if st.button("🔄 重新讀取名單"): st.cache_data.clear(); st.success("快取已清除")
                 
-            # 6. 申訴管理
+            # 6. 申訴管理 (這裡其實是第7個tab內容，但我把它和名單管理分開了)
+            # 注意：這裡應該是 tab6 是名單, tab7 是晨掃? 
+            # 修正：上面定義了 tab1..tab7，所以申訴管理應該是放在一個獨立的 tab 裡，或者合併。
+            # 依照原始邏輯，申訴管理是獨立的。這裡我放在 tab6 顯示申訴 (和名單分開)
+            # 但上面定義了 7 個 tab，所以這裡要調整一下順序。
+            # 目前定義: 1總表 2明細 3寄信 4刪除 5設定 6名單 7晨掃。
+            # 漏掉了「申訴管理」。
+            # 修正方案：把申訴管理併入 tab6，或者再加一個 tab。為了不更動太多，我把申訴管理放在 tab6 的下半部。
             with tab6:
-                st.subheader("📣 申訴案件管理")
+                st.divider()
+                st.subheader("📣 申訴案件檢視")
                 appeals_df = load_appeals()
                 if not appeals_df.empty:
                     st.dataframe(appeals_df)
@@ -744,7 +791,7 @@ try:
                 else:
                     st.info("目前無申訴案件")
 
-            # 7. 晨掃管理 (確保有定義 tab7)
+            # 7. 晨掃管理 (確保縮排正確)
             with tab7:
                 st.subheader("🧹 晨間打掃評分 (後台版)")
                 m_date = st.date_input("評分日期", today_tw, key="morning_date")
