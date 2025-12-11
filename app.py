@@ -325,26 +325,38 @@ def save_appeal(entry, proof_file=None):
     if not ws.get_all_values():
         ws.append_row(APPEAL_COLUMNS)
 
-    # 讀取佐證照片
+    # 處理佐證照片
     if proof_file:
-        proof_file.seek(0)
-        data = proof_file.read()
-        fname = f"Appeal_{entry['班級']}_{datetime.now().strftime('%H%M%S')}.jpg"
-        link = upload_image_to_drive(io.BytesIO(data), fname)
+        try:
+            proof_file.seek(0)
+            data = proof_file.read()
+        except Exception as e:
+            st.error(f"❌ 讀取佐證照片失敗: {e}")
+            return False
+
+        # 檢查 10MB 限制
+        if len(data) > MAX_IMAGE_BYTES:
+            mb = len(data) / (1024 * 1024)
+            st.error(f"❌ 佐證照片過大 ({mb:.1f} MB)，請壓縮到 10MB 以下再上傳。")
+            return False
+
+        fname = f"Appeal_{entry.get('班級','')}_{datetime.now().strftime('%H%M%S')}.jpg"
+        proof_io = io.BytesIO(data)
+        link = upload_image_to_drive(proof_io, fname)
         entry["佐證照片"] = link if link else "UPLOAD_FAILED"
     else:
         entry["佐證照片"] = ""
 
-    # ★★★★★ 這是關鍵：新增預設處理狀態 ★★★★★
+    # ★ 新增預設欄位：處理狀態 ★
     entry["處理狀態"] = entry.get("處理狀態", "待處理")
 
-    # 按欄位順序寫入 row（避免 KeyError）
+    # 依照定義欄位順序輸出
     row = [str(entry.get(col, "")) for col in APPEAL_COLUMNS]
 
     try:
         ws.append_row(row)
-        st.success("📩 申訴提交成功")
         st.cache_data.clear()
+        st.success("📩 申訴提交成功")
         return True
     except Exception as e:
         st.error(f"❌ 寫入申訴資料失敗：{e}")
@@ -961,6 +973,7 @@ def save_appeal(entry, proof_file=None):
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+
 
 
 
