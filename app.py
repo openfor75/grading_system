@@ -5,6 +5,8 @@ import smtplib
 import time
 import io
 import traceback
+import queue  # 新增
+import threading  # 新增
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
@@ -126,11 +128,11 @@ try:
                     time.sleep(wait_time * (attempt + 1))
                     continue
                 else:
-                    st.error(f"❌ 讀取分頁 '{tab_name}' 失敗: {e}")
+                    print(f"❌ 讀取分頁 '{tab_name}' 失敗: {e}") # 改用 print 避免背景執行緒報錯
                     return None
         return None
 
-    # --- Google Drive 上傳邏輯 (修正版) ---
+    # --- Google Drive 上傳邏輯 ---
     def upload_image_to_drive(file_obj, filename, folder_id="12w1Xk-2iHM_dpPVvtruQ2hDyL9pvMPUg"):
         """將圖片上傳至 Google Drive 指定資料夾 ID"""
         service = get_drive_service()
@@ -158,9 +160,8 @@ try:
             return f"https://drive.google.com/thumbnail?id={file.get('id')}&sz=w1000"
 
         except Exception as e:
-            # --- 關鍵修正：印出詳細錯誤 ---
-            st.error(f"⚠️ Google Drive 上傳失敗: {str(e)}")
-            st.caption("常見原因提示：1. Google Drive API 未啟用。 2. Service Account 未加入資料夾編輯權限。")
+            # 背景執行緒中不使用 st.error，改為 print
+            print(f"⚠️ Google Drive 上傳失敗: {str(e)}")
             return None
 
     def clean_id(val):
@@ -171,7 +172,83 @@ try:
             return str(val).strip()
 
     # ==========================================
-    # 2. 資料讀寫邏輯
+    # NEW: 背景佇列處理系統 (高效能寫入核心)
+    # ==========================================
+    @st.cache_resource
+    def get_task_queue():
+        return queue.Queue()
+
+    def background_worker():
+        """背景執行緒：負責消化 Queue 中的任務，並執行上傳與寫入"""
+        q = get_task_queue()
+        print("🚀 背景工作者已啟動，等待任務中...")
+        
+        while True:
+            # 阻塞直到有任務
+            task = q.get()
+            
+            try:
+                entry = task['entry']
+                images_data = task['images']
+                filenames = task['filenames']
+                
+                print(f"🔄 [背景處理中] 班級：{entry.get('班級', '未知')} | 項目：{entry.get('評分項目')}")
+
+                # 1. 上傳圖片 (如果有)
+                drive_links = []
+                if images_data:
+                    for img_bytes, fname in zip(images_data, filenames):
+                        # 將 bytes 轉回 file-like object
+                        file_obj = io.BytesIO(img_bytes)
+                        link = upload_image_to_drive(file_obj, fname)
+                        if link:
+                            drive_links.append(link)
+                        else:
+                            drive_links.append("UPLOAD_FAILED")
+                    
+                    # 更新 entry 的照片欄位
+                    entry["照片路徑"] = ";".join(drive_links)
+
+                # 2. 寫入 Google Sheet
+                ws = get_worksheet(SHEET_TABS["main"])
+                if ws:
+                    # 確保 Header 存在
+                    if not ws.get_all_values(): ws.append_row(EXPECTED_COLUMNS)
+                    
+                    row = []
+                    for col in EXPECTED_COLUMNS:
+                        val = entry.get(col, "")
+                        if isinstance(val, bool): val = str(val).upper()
+                        if col == "日期": val = str(val)
+                        row.append(val)
+                    
+                    ws.append_row(row)
+                    print(f"✅ [寫入成功] {entry.get('班級')}")
+                    
+                    # 3. 速率限制 (Rate Limiting) - 關鍵！
+                    # 強制休息 1.5 秒，避免 50 人同時送出時炸掉 Google API Quota
+                    time.sleep(1.5)
+                else:
+                    print("❌ 無法取得 Worksheet，任務失敗")
+
+            except Exception as e:
+                print(f"⚠️ 背景任務發生錯誤: {e}")
+                traceback.print_exc()
+            finally:
+                q.task_done()
+
+    @st.cache_resource
+    def start_background_thread():
+        # 啟動守護執行緒 (Daemon Thread)，隨主程式關閉而關閉
+        t = threading.Thread(target=background_worker, daemon=True)
+        t.start()
+        return t
+
+    # 啟動背景服務
+    start_background_thread()
+
+    # ==========================================
+    # 2. 資料讀寫邏輯 (修改 save_entry)
     # ==========================================
 
     @st.cache_data(ttl=60)
@@ -213,48 +290,46 @@ try:
             return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
     def save_entry(new_entry, uploaded_files=None):
-        ws = get_worksheet(SHEET_TABS["main"])
-        if not ws: st.error("寫入失敗"); return
-        if not ws.get_all_values(): ws.append_row(EXPECTED_COLUMNS)
-
-        if "紀錄ID" not in new_entry:
-            new_entry["紀錄ID"] = datetime.now(TW_TZ).strftime("%Y%m%d%H%M%S")
-
-        # --- 處理照片上傳 ---
-        drive_links = []
+        """
+        [修改版] 非同步寫入模式
+        不等待 Google API，直接將資料與圖片 Bytes 丟入 Queue 即回傳成功。
+        """
+        # 1. 預先讀取圖片為 Bytes (因為 UploadedFile 在 function 結束後會失效)
+        images_bytes = []
+        file_names = []
         if uploaded_files:
             for i, up_file in enumerate(uploaded_files):
                 up_file.seek(0)
+                img_data = up_file.read() # 讀取二進制
+                images_bytes.append(img_data)
+                
+                # 預先生成檔名
                 fname = f"{new_entry['日期']}_{new_entry['班級']}_{i}.jpg"
-                link = upload_image_to_drive(up_file, fname)
-                if link:
-                    drive_links.append(link)
-                else:
-                    drive_links.append("UPLOAD_FAILED") # 標記失敗
+                file_names.append(fname)
         
-        if drive_links:
-            new_entry["照片路徑"] = ";".join(drive_links)
-        # -----------------------------
+        # 2. 補完資料
+        if "紀錄ID" not in new_entry:
+            new_entry["紀錄ID"] = datetime.now(TW_TZ).strftime("%Y%m%d%H%M%S")
 
-        row = []
-        for col in EXPECTED_COLUMNS:
-            val = new_entry.get(col, "")
-            if isinstance(val, bool): val = str(val).upper()
-            if col == "日期": val = str(val)
-            row.append(val)
+        # 3. 打包任務
+        task = {
+            'entry': new_entry,
+            'images': images_bytes,
+            'filenames': file_names
+        }
+
+        # 4. 丟入佇列 (Queue)
+        q = get_task_queue()
+        q.put(task)
         
-        try:
-            ws.append_row(row)
-            st.cache_data.clear()
-        except Exception as e:
-            if "429" in str(e):
-                time.sleep(2)
-                ws.append_row(row)
-                st.cache_data.clear()
-            else:
-                st.error(f"寫入錯誤: {e}")
+        # 5. 清除快取 (讓前端有機會在稍後刷新到新資料)
+        st.cache_data.clear()
+        
+        # 這裡不做錯誤處理回傳，因為丟入 Queue 視為成功
+        print(f"📥 任務已排入佇列，目前等待數: {q.qsize()}")
 
     def save_appeal(entry, proof_file=None):
+        # 申訴量少，維持同步寫入即可，暫不改動
         ws = get_worksheet(SHEET_TABS["appeals"])
         if not ws: st.error("申訴系統連線失敗"); return
         if not ws.get_all_values(): ws.append_row(APPEAL_COLUMNS)
@@ -587,7 +662,7 @@ try:
                                 if vios:
                                     save_entry({**base, "班級": row["班級"], "評分項目": role, "垃圾原始分": len(vios), "備註": f"{trash_cat}-{'、'.join(vios)}", "違規細項": trash_cat})
                                     cnt += 1
-                            st.success(f"已登記 {cnt} 班" if cnt else "無違規")
+                            st.success(f"已排入背景處理： {cnt} 班" if cnt else "無違規")
                             st.rerun()
                 else:
                     st.markdown("### 🏫選擇班級")
@@ -618,7 +693,7 @@ try:
                                     {"日期": input_date, "週次": week_num, "檢查人員": inspector_name, "登錄時間": now_tw.strftime("%Y-%m-%d %H:%M:%S"), "修正": is_fix, "班級": selected_class, "評分項目": role, "內掃原始分": in_s, "外掃原始分": out_s, "手機人數": ph_c, "備註": note},
                                     uploaded_files=files
                                 )
-                                st.toast(f"✅ 已儲存：{selected_class}"); st.rerun()
+                                st.toast(f"✅ 已排入儲存佇列：{selected_class}"); st.rerun()
 
     # --- 模式2: 衛生股長 ---
     elif app_mode == "我是班上衛生股長":
@@ -644,11 +719,9 @@ try:
                         st.write(f"📝 說明: {r['備註']}")
                         st.caption(f"檢查人員: {r['檢查人員']}")
                         
-                        # --- 關鍵修正：顯示圖片時過濾 UPLOAD_FAILED ---
                         raw_photo_path = str(r.get("照片路徑", "")).strip()
                         if raw_photo_path and raw_photo_path.lower() != "nan":
                             path_list = [p.strip() for p in raw_photo_path.split(";") if p.strip()]
-                            # 過濾無效路徑
                             valid_photos = [p for p in path_list if p != "UPLOAD_FAILED" and (p.startswith("http") or os.path.exists(p))]
                             
                             if valid_photos:
@@ -699,6 +772,16 @@ try:
     # --- 模式3: 後台 ---
     elif app_mode == "衛生組後台":
         st.title("⚙️ 管理後台")
+        
+        # --- NEW: 後台監控區塊 ---
+        q = get_task_queue()
+        q_size = q.qsize()
+        if q_size > 0:
+            st.warning(f"🚀 背景系統忙碌中：尚有 {q_size} 筆資料排隊寫入 Google Sheet...")
+        else:
+            st.success("✅ 系統待機中：所有資料已同步完成")
+        # ------------------------
+
         pwd = st.text_input("管理密碼", type="password")
         
         if pwd == st.secrets["system_config"]["admin_password"]:
@@ -926,7 +1009,7 @@ try:
                                     stu_class = ROSTER_DICT.get(tid, f"查無({tid})")
                                     save_entry({**base, "班級": stu_class, "評分項目": m_role, "晨間打掃原始分": morning_score, "備註": f"晨掃未到 ({tloc}) - 學號:{tid}", "晨掃未到者": tid})
                                     count += 1
-                                st.error(f"⚠️ 已登記 {count} 人未到，共扣 {count * morning_score} 分")
+                                st.error(f"⚠️ 已排入背景佇列： {count} 人未到")
                             st.rerun()
                 elif status == "no_data": st.warning(f"{m_date} 無輪值資料，請確認 Google Sheet (duty)。")
                 else: st.error("讀取失敗")
