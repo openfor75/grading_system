@@ -378,10 +378,28 @@ try:
     @st.cache_data(ttl=60)
     def load_appeals():
         ws = get_worksheet(SHEET_TABS["appeals"])
-        if not ws: return pd.DataFrame(columns=APPEAL_COLUMNS)
-        try: return pd.DataFrame(ws.get_all_records())
-        except: return pd.DataFrame(columns=APPEAL_COLUMNS)
+        if not ws:
+            return pd.DataFrame(columns=APPEAL_COLUMNS)
 
+        try:
+            records = ws.get_all_records()  # 以第一列為欄位名稱
+            df = pd.DataFrame(records)
+        except Exception:
+            return pd.DataFrame(columns=APPEAL_COLUMNS)
+
+        # 確保所有定義好的欄位都存在
+        for col in APPEAL_COLUMNS:
+            if col not in df.columns:
+                # 對「處理狀態」給合理預設，其餘給空字串
+                if col == "處理狀態":
+                    df[col] = "待處理"
+                else:
+                    df[col] = ""
+
+        # 欄位順序整理成 APPEAL_COLUMNS
+        df = df[APPEAL_COLUMNS]
+
+        return df
     def delete_rows_by_ids(record_ids_to_delete):
         ws = get_worksheet(SHEET_TABS["main"])
         if not ws: return False
@@ -986,6 +1004,7 @@ try:
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+
 
 
 
