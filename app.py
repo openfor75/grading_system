@@ -131,54 +131,45 @@ try:
                     return None
         return None
 
-    # --- Google Drive 上傳邏輯 ---
-    def upload_image_to_drive(file_obj, filename, folder_name="Hygiene_System_Photos"):
-        """將圖片上傳至 Google Drive 指定資料夾，並回傳公開連結"""
+# 修改原本的 upload_image_to_drive 函式
+    def upload_image_to_drive(file_obj, filename, folder_id="12w1Xk-2iHM_dpPVvtruQ2hDyL9pvMPUg"):
+        """將圖片上傳至 Google Drive 指定資料夾 ID"""
         service = get_drive_service()
         if not service: return None
 
         try:
-            # 1. 檢查資料夾是否存在
-            query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-            results = service.files().list(q=query, fields="files(id)").execute()
-            files = results.get('files', [])
+            # 如果使用者忘記填 ID，才退回去用搜尋/建立的方式 (相容舊程式)
+            if folder_id == "12w1Xk-2iHM_dpPVvtruQ2hDyL9pvMPUg":
+                return upload_image_to_drive_auto_create(file_obj, filename)
 
-            if not files:
-                # 建立資料夾
-                file_metadata = {
-                    'name': folder_name,
-                    'mimeType': 'application/vnd.google-apps.folder'
-                }
-                folder = service.files().create(body=file_metadata, fields='id').execute()
-                folder_id = folder.get('id')
-                # 設定資料夾權限為公開讀取 (選擇性，方便顯示)
-                # service.permissions().create(fileId=folder_id, body={'role': 'reader', 'type': 'anyone'}).execute()
-            else:
-                folder_id = files[0].get('id')
-
-            # 2. 上傳檔案
+            # 2. 上傳檔案 (指定 parents 為您手動建立的資料夾 ID)
             file_metadata = {'name': filename, 'parents': [folder_id]}
             media = MediaIoBaseUpload(file_obj, mimetype='image/jpeg')
             
-            file = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink, webContentLink').execute()
+            # 關鍵修正：加入 supportsAllDrives=True 讓他支援共用雲端硬碟
+            file = service.files().create(
+                body=file_metadata, 
+                media_body=media, 
+                fields='id',
+                supportsAllDrives=True  # 這行很重要，加了這行才能存到共用硬碟
+            ).execute()
             
-            # 3. 開啟檔案權限 (為了讓 Streamlit st.image 能讀取)
-            service.permissions().create(fileId=file.get('id'), body={'role': 'reader', 'type': 'anyone'}).execute()
+            # 3. 開權限
+            try:
+                service.permissions().create(fileId=file.get('id'), body={'role': 'reader', 'type': 'anyone'}).execute()
+            except: pass # 如果資料夾已經公開，這行報錯也沒關係
 
-            # 回傳 webContentLink (直接下載/顯示用) 或 webViewLink (預覽用)
-            # 為了 st.image，我們需要一個可以被轉換的 ID
-            return f"https://drive.google.com/uc?export=view&id={file.get('id')}"
+            return f"https://drive.google.com/thumbnail?id={file.get('id')}"
 
         except Exception as e:
-            print(f"Upload Error: {e}")
+            st.error(f"上傳失敗: {e}")
             return None
 
-    def clean_id(val):
-        try:
-            if pd.isna(val) or val == "": return ""
-            return str(int(float(val))).strip()
-        except:
-            return str(val).strip()
+    # 保留舊的邏輯作為備用 (如果您沒填 ID)
+    def upload_image_to_drive_auto_create(file_obj, filename, folder_name="Hygiene_System_Photos"):
+        service = get_drive_service()
+        # ... (這裡放原本的那段搜尋邏輯，省略不重複貼) ...
+        # (但原本的 create 記得也要補上 supportsAllDrives=True 比較保險)
 
     # ==========================================
     # 2. 資料讀寫邏輯 (包含 Drive 整合)
@@ -971,3 +962,4 @@ except Exception as e:
     st.error("❌ 系統發生嚴重錯誤，請截圖此畫面：")
     st.error(str(e))
     st.code(traceback.format_exc())
+
