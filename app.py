@@ -27,6 +27,8 @@ try:
     # 0. 基礎設定與時區
     # ==========================================
     TW_TZ = pytz.timezone('Asia/Taipei')
+
+    MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 單檔 10MB 上限
     
     # Google Sheet 網址
     SHEET_URL = "https://docs.google.com/spreadsheets/d/1nrX4v-K0xr-lygiBXrBwp4eWiNi9LY0-LIr-K1vBHDw/edit#gid=0"
@@ -261,15 +263,7 @@ try:
             st.error(f"讀取資料錯誤: {e}"); return pd.DataFrame(columns=EXPECTED_COLUMNS)
 
     def save_entry(new_entry, uploaded_files=None):
-        """
-        接受前端送進來的評分紀錄：
-        - 上傳的圖片先寫到本機暫存資料夾 IMG_DIR
-        - 佇列裡只放「檔案路徑 + 檔名」，減少記憶體壓力
-        - 背景 worker 再負責真正上傳到 Google Drive + 寫入試算表
-        """
-        image_paths = []
-        file_names = []
-
+        ...
         if uploaded_files:
             for i, up_file in enumerate(uploaded_files):
                 if not up_file:
@@ -284,10 +278,16 @@ try:
                 if not data:
                     continue
 
-                # 給這張照片一個穩定的對外檔名（上傳到 Drive 用）
-                logical_fname = f"{new_entry['日期']}_{new_entry['班級']}_{i}.jpg"
+                # --- 新增：檔案大小檢查(10MB) ---
+                size = len(data)
+                if size > MAX_IMAGE_BYTES:
+                    # 這裡直接提示使用者，並略過這張檔案
+                    mb = size / (1024 * 1024)
+                    st.warning(f"📸 檔案「{up_file.name}」過大 ({mb:.1f} MB)，已略過。單檔上限為 10 MB。")
+                    continue
+                # -----------------------------
 
-                # 實際在本機暫存的檔名加上 timestamp + uuid，避免撞名
+                logical_fname = f"{new_entry['日期']}_{new_entry['班級']}_{i}.jpg"
                 tmp_fname = f"{datetime.now(TW_TZ).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}_{logical_fname}"
                 local_path = os.path.join(IMG_DIR, tmp_fname)
 
@@ -317,16 +317,44 @@ try:
 
     def save_appeal(entry, proof_file=None):
         ws = get_worksheet(SHEET_TABS["appeals"])
-        if not ws: return False
-        if not ws.get_all_values(): ws.append_row(APPEAL_COLUMNS)
+        if not ws: 
+            return False
+        if not ws.get_all_values(): 
+            ws.append_row(APPEAL_COLUMNS)
+
         if proof_file:
-            proof_file.seek(0)
+            try:
+                proof_file.seek(0)
+                data = proof_file.read()
+            except Exception as e:
+                st.error(f"❌ 讀取佐證照片失敗: {e}")
+                return False
+
+            if not data:
+                st.error("❌ 佐證照片為空檔案")
+                return False
+
+            # --- 新增：檔案大小檢查(10MB) ---
+            size = len(data)
+            if size > MAX_IMAGE_BYTES:
+                mb = size / (1024 * 1024)
+                st.error(f"❌ 佐證照片過大 ({mb:.1f} MB)，請壓縮到 10 MB 以下再上傳。")
+                return False
+            # -------------------------------
+
             fname = f"Appeal_{entry['班級']}_{datetime.now().strftime('%H%M%S')}.jpg"
-            link = upload_image_to_drive(proof_file, fname)
+            # 使用 BytesIO 上傳，避免原始檔案指標位置混亂
+            proof_io = io.BytesIO(data)
+            link = upload_image_to_drive(proof_io, fname)
             entry["佐證照片"] = link if link else "UPLOAD_FAILED"
+
         row = [str(entry.get(col, "")) for col in APPEAL_COLUMNS]
-        try: ws.append_row(row); st.cache_data.clear(); return True
-        except: return False
+        try:
+            ws.append_row(row)
+            st.cache_data.clear()
+            return True
+        except:
+            return False
 
     @st.cache_data(ttl=60)
     def load_appeals():
@@ -939,4 +967,5 @@ try:
 
 except Exception as e:
     st.error("❌ 系統錯誤:"); st.error(str(e)); st.code(traceback.format_exc())
+
 
