@@ -13,7 +13,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 1. 網頁設定 ---
-st.set_page_config(page_title="衛生糾察評分系統(完整修正版)", layout="wide", page_icon="🧹")
+st.set_page_config(page_title="衛生糾察評分系統(無Matplotlib版)", layout="wide", page_icon="🧹")
 
 # --- 2. 捕捉全域錯誤 ---
 try:
@@ -269,7 +269,6 @@ try:
                     s_id = clean_id(row[id_col])
                     s_role = str(row[role_col]).strip() if role_col else ""
                     allowed = []
-                    # 注意：這裡已經不判斷晨掃，因為晨掃移去後台了
                     if "組長" in s_role: allowed = ["內掃檢查", "外掃檢查", "垃圾/回收檢查"]
                     elif "機動" in s_role: allowed = ["內掃檢查", "外掃檢查", "垃圾/回收檢查"]
                     else:
@@ -622,7 +621,8 @@ try:
                         final_report["總成績"] = 90 - final_report["總扣分"]
                         final_report = final_report.sort_values("總成績", ascending=False)
                         
-                        st.dataframe(final_report.style.format("{:.0f}").background_gradient(cmap="RdYlGn", subset=["總成績"], vmin=60, vmax=90))
+                        # 改回一般表格顯示 (無漸層)，以確保穩定性
+                        st.dataframe(final_report.style.format("{:.0f}"))
                         
                         c1, c2 = st.columns(2)
                         # 下載總表
